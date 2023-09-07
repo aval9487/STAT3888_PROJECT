@@ -259,7 +259,7 @@ dict_food <- dict_food %>% janitor::clean_names() %>% rename(extra=x3)
 # remove empty rows
 dict_biom <- dict_biom %>% janitor::remove_empty("rows")
 dict_nutr <- dict_nutr %>% janitor::remove_empty("rows")
-dict_biom <- dict_biom %>% janitor::remove_empty("rows")
+dict_food <- dict_food %>% janitor::remove_empty("rows")
 
 # Create datasets with human readable versions of the variable names
 biom_readable <- dict_biom %>% 
@@ -316,8 +316,9 @@ special_biom_new$value = as.numeric(special_biom_new$value)
 special_nutr <- get_special_value_meanings(dict_nutr) %>% na.omit()
 special_food <- get_special_value_meanings(dict_food) %>% na.omit()
 #============================================================
-
-
+# PATCH 3 (*)
+miss_defs = tolower(miss_defs) #Adds _MISS vars for COMBCODE and EATOCC
+#============================================================
 
 proc_biom <- categorical_to_factor(types_biom,raw_biom)
 proc_nutr <- categorical_to_factor(types_nutr,raw_nutr)
@@ -356,6 +357,7 @@ tech_biom = tech_biom_mod %>% select(
   -c(EXLWTBC, EXLWMBC, EXLWVBC)
 )
 ```
+
 
 
 PATCH 2 - Link Food Class to Food data
@@ -419,27 +421,63 @@ tech_food <- tech_food %>%
 
 ```
 
+PATCH 3 - FIXING FOOD DATA
+Found that expected _MISS variables are not present in tech_food (corrected by tolower()) (*)
+- Other expected _MISS vars (derived from types_food e.g., psaltadd, density, etc.) are not present:
+```{r}
+# checking if all vars in type_food are present in raw data (found that PSALTADD is not present)
+vars_in_types_food = subset(types_food, !is.na(description))$variable_name
+vars_in_raw = colnames(raw_food)
+setdiff(vars_in_types_food, vars_in_raw)
+setdiff(vars_in_raw, vars_in_types_food)
+# Can see that the expected vars are not actually present in the raw data +
+ #there are 4 redundant cols at the end of raw_food - need to remove these.
+tech_food = tech_food %>% select(-setdiff(vars_in_raw, vars_in_types_food))
+```
 
-PATCH 3 - LINK ABORIGINAL AND ISLANDER COHORT
+PATCH 4 - MERGING BIOM, NUTR and FOOD
 
-Note that 230ish variables are common between the two datasets. Some variables that are not in the above data dictionary (aboriginal/dictionary.csv) can be found in the numstat dict file (biom, food, nutr, food_class)
+Biom and nutrient can be joined by ABSPID as there are no duplicate entries for PID
 
+```{r}
+length(unique(tech_biom$ABSPID))
+length(unique(tech_nutr$ABSPID))
+```
 
+```{r}
+biom_nutr_raw = tech_biom %>%
+  full_join(tech_nutr, by = "ABSPID") 
+```
 
+FOOD contains multiple entries per person (ABSPID) so its not a trivial join.
+Im thinking I create a list object for each ABSPID that contains all the information for that ABSPID.
+I.e., Create a column in biom_nutr_raw called FOOD_data ( and for each ABSPID it will contain all info for that ABSPID in tech_food
 
+all info 
+```{r}
+# Split the tech_food dataframe into a list based on ABSPID
+list_data <- with(tech_food, split(tech_food, ABSPID))
 
+# Create a new dataframe with unique ABSPID and corresponding list_data
+list_df <- data.frame(ABSPID = names(list_data), FOOD_DATA = I(list_data))
 
+# Merge with biom_nutr_raw
+biom_nutr_food <- merge(biom_nutr_raw, list_df, by = "ABSPID", all.x = TRUE)
 
+# If some ABSPIDs from biom_nutr_raw don't have corresponding data in tech_nutr, 
+# the FOOD_DATA column for those ABSPIDs will have NAs. If you want to replace NAs with empty lists, you can do:
+biom_nutr_food$FOOD_DATA[sapply(biom_nutr_food$FOOD_DATA, is.null)] <- I(list(data.frame()))
 
-
+# Could further split into daynum for example (there are 2 levels)
+```
 
 Save for future use.
 ```{r}
  save(tech_biom, dict_biom, types_biom,
       tech_nutr, dict_nutr, types_nutr,
-      tech_food, dict_nutr, types_food,
-      dict_food_class,
-      file = "current.Rdata")
+      tech_food, dict_food, types_food,
+      dict_food_class, biom_nutr_food,
+      file = "p4.Rdata")
 ```
 
 
