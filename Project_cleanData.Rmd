@@ -471,13 +471,149 @@ biom_nutr_food$FOOD_DATA[sapply(biom_nutr_food$FOOD_DATA, is.null)] <- I(list(da
 # Could further split into daynum for example (there are 2 levels)
 ```
 
+
+
+PATCH 5 - LINK ABORIGINAL AND ISLANDER COHORT
+
+Note that 230ish variables are common between the two datasets. Some variables that are not in the above data dictionary (aboriginal/dictionary.csv) can be found in the numstat dict file (biom, food, nutr, food_class)
+```{r}
+raw_abor = read.csv(here("data/aboriginal","aboriginal_cohort.csv"), header=TRUE)
+dict_abor <- read.csv(here("data/aboriginal","dictionary.csv"),header=TRUE)
+```
+
+
+```{r}
+# Function to find descriptions
+find_descriptions <- function(col_names, dictionaries) {
+  descriptions <- character(0)
+  
+  for (col_name in col_names) {
+    for (dict in dictionaries) {
+      match_row <- match(col_name, dict$variable_name)
+      if (!is.na(match_row)) {
+        descriptions <- c(descriptions, dict$description[match_row])
+        break  # Break out of the inner loop once a match is found
+      }
+    }
+  }
+  
+  return(descriptions)
+}
+```
+
+Find colnames in common between biom_nutr_food and aboriginal/islander and extract descriptions
+```{r}
+abor_cols = colnames(raw_abor)
+df_cols = colnames(biom_nutr_food)
+food_cols = colnames(tech_food)
+common_df_abor_cols = intersect(df_cols, abor_cols)
+common_food_abor_cols = intersect(food_cols, abor_cols)
+#only ABSHID (i.e., food data (in biom_nutr_food) not relev for aboriginal cohort)
+descriptions1 <- find_descriptions(common_df_abor_cols, list(types_biom, types_nutr))
+descriptions2 <- find_descriptions(common_food_abor_cols, list(types_food))
+
+```
+
+
+INDGSTAT not in raw data! need another way to classify as indigenous.
+
+<!-- ATTEMPT 1 -->
+<!-- the cultural identification sheet  -->
+<!-- ```{r} -->
+<!-- # set up culture id dictionary for indigenous cohort -->
+<!-- dict_abor <- read_excel(here("data/aboriginal", "australian aboriginal and torres strait islander health survey data item list.xls"), sheet = 11, skip = 4) -->
+<!-- dict_abor = dict_abor %>% select ( -->
+<!--   variable_name = `SAS name`, -->
+<!--   `Items & categories`, -->
+<!--   `Main population` -->
+<!-- )  -->
+<!-- dict_abor <- dict_abor %>% janitor::remove_empty("rows") -->
+<!-- abor_readable <- dict_abor %>%  -->
+<!--   filter(!is.na(variable_name))  -->
+<!-- dict_abor <- dict_abor %>% tidyr::fill(variable_name) -->
+<!-- var_names_abor <- unique(dict_abor$variable_name) -->
+<!-- tib4 <- tibble(variable_type=get_type(dict_abor)) -->
+<!-- types_abor <- bind_cols(abor_readable, tib4) -->
+<!-- cult_id = types_abor[-c(1,nrow(types_abor)), ] -->
+<!-- ``` -->
+<!-- Now, can subset aboriginal cohort data based on the cult id related variables (that we can then use to infer indigenous status) -->
+
+<!-- ```{r} -->
+<!-- cult_id$variable_name %in% colnames(raw_abor) -->
+<!-- 'INDGSTAT' %in% colnames(raw_abor) -->
+<!-- ``` -->
+
+Turns out culture vars arent in raw data. Looking at the dictionary.csv file more carefully, i noticed 'Type of Aboriginal and ...Islander household' which led me to the 'household level' sheet in the dic
+
+
+can use household level data to determine number of aboriginal/islander in each home (only ABSHID is provided in raw data so makes sense)
+- rmk: theres a lot of data there e.g., household_type etc that may help with accuracy later on
+
+```{r}
+# set up household dictionary for indigenous cohort (might be needed later)
+dict_abor <- read_excel(here("data/aboriginal", "australian aboriginal and torres strait islander health survey data item list.xls"), sheet = 4, skip = 4) # skip to where relevant in sheet
+dict_abor = dict_abor %>% select (
+  variable_name = `SAS name`,
+  `Items & categories`,
+  `Main population`
+) 
+dict_abor <- dict_abor %>% janitor::remove_empty("rows")
+abor_readable <- dict_abor %>% 
+  filter(!is.na(variable_name)) 
+dict_abor <- dict_abor %>% tidyr::fill(variable_name)
+var_names_abor <- unique(dict_abor$variable_name)
+tib4 <- tibble(variable_type=get_type(dict_abor))
+types_abor <- bind_cols(abor_readable, tib4)
+```
+
+
+Subset id and number of aboriginal/islander in house
+```{r}
+df_abor = raw_abor %>% select(
+  ABSHID,
+  NOATSIHH
+)
+```
+
+
+```{r}
+# step 1: clean cols that are in biom data
+biom_cols = colnames(tech_biom)
+common_biom_abor_cols = intersect(biom_cols, abor_cols)
+common_biom_abor_cols = c("ABSHID", common_biom_abor_cols)
+biom_abor_df = raw_abor[, common_biom_abor_cols]
+tech_biom_abor = raw_to_tech(biom_abor_df, special_biom_new, types_biom)
+# step 2: clean cols that are in nutr data
+nutr_cols = colnames(tech_nutr)
+common_nutr_abor_cols = intersect(nutr_cols, abor_cols)
+common_nutr_abor_cols = c(common_nutr_abor_cols, "ABSHID")
+nutr_abor_df = raw_abor[, common_nutr_abor_cols]
+tech_nutr_abor = raw_to_tech(nutr_abor_df, special_nutr, types_nutr)
+# step 3: full merge (can filter later if needed)
+tech_abor = merge(tech_biom_abor, tech_nutr_abor, by = "ABSHID", all = TRUE)
+
+# Now need to join household_number var
+tech_abor = merge(tech_abor, df_abor, by = "ABSHID", all = TRUE)
+```
+
+
+Final DFs
+```{r}
+head(tech_abor)
+head(biom_nutr_food)
+```
+
+
+
 Save for future use.
 ```{r}
+aborig_household_dict = dict_abor
  save(tech_biom, dict_biom, types_biom,
       tech_nutr, dict_nutr, types_nutr,
       tech_food, dict_food, types_food,
       dict_food_class, biom_nutr_food,
-      file = "p4.Rdata")
+      tech_abor,aborig_household_dict, 
+      file = "p5.Rdata")
 ```
 
 
