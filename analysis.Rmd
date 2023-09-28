@@ -1,0 +1,295 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(stats)
+library(ggplot2)
+library(dplyr)
+```
+
+
+```{r}
+nonind = biom_nutr_food
+ind = tech_abor
+```
+
+
+NUTRITION
+
+excess in sodium, processed foods, added sugars and unhealthy fats
+
+low in fruit/veg, 
+
+```{r}
+nutrition <- c(
+  "sugper1", "sugper2", 
+  "fatper1", "fatper2", 
+  "satper1", "satper2",
+  "polyper1", "polyper2",
+  "fibrper1", "fibrper2",
+  "alcper1", "alcper2",
+  "fresug1n",
+  "fruit1n",
+  "vegleg1n", "greens1n", "vgorsv1n", "starch1n", "legveg1n", "othveg1n", "vegleg2n",
+  "legmt1n", "legveg1n", "vegleg2n",
+  "Rdmtl1n",
+  "pltyl1n",
+  "fish1n"
+)
+
+cvd <- c(
+  "PHDCMWBC",
+  "BMISC",
+  "TRIGNTR", "TRIGRESB",
+  "DIAHBRSK",
+  "SYSTOL",
+  "DIASTOL",
+  "HDLCHREB",
+  "LDLNTR", "LDLRESB",
+  "APOBNTR"
+)
+nutrition = toupper(nutrition)
+```
+
+```{r}
+combined_vars <- c(nutrition, cvd)
+ind_df <- ind[, combined_vars]
+nonind_df <- nonind[, combined_vars]
+```
+
+```{r}
+p_values <- numeric(length(combined_vars))
+
+# looping through each variable
+for (i in 1:length(combined_vars)) {
+  # exclude NA values for comparison
+  ind_var_data <- na.omit(ind_df[[combined_vars[i]]])
+  nonind_var_data <- na.omit(nonind_df[[combined_vars[i]]])
+  
+  # if continuous (Kolmogorov-Smirnov test)
+  if (is.numeric(ind_var_data) && is.numeric(nonind_var_data)) {
+    test_result <- ks.test(ind_var_data, nonind_var_data)
+    p_values[i] <- test_result$p.value
+  }
+  # if categorical (Chi-squre or Fisher (if < 5 samples))
+  else if (is.factor(ind_var_data) || is.character(ind_var_data)) {
+    table_data <- table(ind_var_data, nonind_var_data)
+    if (any(chisq.test(table_data)$expected < 5)) {
+      test_result <- fisher.test(table_data)
+    } else {
+      test_result <- chisq.test(table_data)
+    }
+    
+    p_values[i] <- test_result$p.value
+  }
+}
+
+names(p_values) <- combined_vars
+
+# extract variables with p-values less than 0.05
+significant_vars <- names(p_values[p_values < 0.05])
+
+print(significant_vars)
+
+
+```
+
+
+```{r}
+# 1. Check Day 1 and Day 2 Measurements
+
+# Identify variables ending with "1" or "2"
+day1_vars <- grep("1$", nutrition, value = TRUE)
+day2_vars <- grep("2$", nutrition, value = TRUE)
+
+# Check if participants with measurements for day 1 also have measurements for day 2
+all_have_day2 <- sapply(1:length(day1_vars), function(i) {
+  all(!is.na(ind_df[[day1_vars[i]]]) & !is.na(ind_df[[day2_vars[i]]]))
+})
+
+# If all participants have both day 1 and day 2 measurements, compute the mean
+if (all(all_have_day2)) {
+  for (i in 1:length(day1_vars)) {
+    ind_df[[paste0("mean_", gsub("1$", "", day1_vars[i]))]] <- rowMeans(ind_df[, c(day1_vars[i], day2_vars[i])], na.rm = TRUE)
+    nonind_df[[paste0("mean_", gsub("1$", "", day1_vars[i]))]] <- rowMeans(nonind_df[, c(day1_vars[i], day2_vars[i])], na.rm = TRUE)
+  }
+} else {
+  # Drop day2 variables if not all participants have both measurements
+  ind_df <- ind_df[, !names(ind_df) %in% day2_vars]
+  nonind_df <- nonind_df[, !names(nonind_df) %in% day2_vars]
+}
+
+# 2. Aggregate Nutrient Intakes
+
+# Vegetable intake
+veg_vars <- c("vegleg1n", "greens1n", "vgorsv1n", "starch1n", "legveg1n", "othveg1n", "vegleg2n")
+veg_vars = toupper(veg_vars)
+ind_df$veg_intake <- rowMeans(ind_df[, veg_vars], na.rm = TRUE)
+nonind_df$veg_intake <- rowMeans(nonind_df[, veg_vars], na.rm = TRUE)
+
+# Legume intake
+leg_vars <- c("legmt1n", "legveg1n", "vegleg1n", "vegleg2n")
+leg_vars = toupper(leg_vars)
+ind_df$leg_intake <- rowMeans(ind_df[, leg_vars], na.rm = TRUE)
+nonind_df$leg_intake <- rowMeans(nonind_df[, leg_vars], na.rm = TRUE)
+
+```
+
+```{r}
+# Combine the two dataframes with a new column indicating the group
+ind_df$group <- "ind"
+nonind_df$group <- "nonind"
+combined_df <- rbind(ind_df, nonind_df)
+
+
+
+```
+
+
+```{r}
+combined_df <- combined_df %>%
+  mutate(across(where(is.character), as.factor))
+
+```
+
+```{r}
+# Loop through each cvd variable
+for (var in cvd) {
+  # Check if the variable is a factor
+  if (is.factor(combined_df[[var]])) {
+    # Extract the current levels of the factor
+    current_levels <- levels(combined_df[[var]])
+    
+    # For each level, get the corresponding description from dict_biom
+    new_levels <- sapply(current_levels, function(level) {
+      desc <- dict_biom$description[dict_biom$variable_name == var & grepl(paste0("^", level, "\\."), dict_biom$description)]
+      if (length(desc) == 1) return(gsub(paste0("^", level, "\\.\\s*"), "", desc))
+      else return(level)  # In case no matching description is found
+    })
+    
+    # Update the levels of the factor
+    levels(combined_df[[var]]) <- new_levels
+  }
+}
+
+```
+
+
+```{r}
+# Update descriptions for the LDLRESB variable
+
+# Extract the current levels of LDLRESB
+current_levels <- levels(combined_df$LDLRESB)
+
+# For each level, add a zero prefix and get the corresponding description from dict_biom
+new_levels <- sapply(current_levels, function(level) {
+  # Add zero prefix to the level
+  level_with_zero <- sprintf("%02d", as.integer(level))
+  
+  desc <- dict_biom$description[dict_biom$variable_name == "LDLRESB" & grepl(paste0("^", level_with_zero, "\\."), dict_biom$description)]
+  if (length(desc) == 1) return(gsub(paste0("^", level_with_zero, "\\.\\s*"), "", desc))
+  else return(level)  # In case no matching description is found
+})
+
+# Update the levels of the LDLRESB factor
+levels(combined_df$LDLRESB) <- new_levels
+
+```
+
+
+```{r}
+# Update descriptions for the TRIGRESB variable
+
+# Extract the current levels of TRIGRESB
+current_levels <- levels(combined_df$TRIGRESB)
+
+# For each level, add a zero prefix and get the corresponding description from dict_biom
+new_levels <- sapply(current_levels, function(level) {
+  # Add zero prefix to the level
+  level_with_zero <- sprintf("%02d", as.integer(level))
+  
+  desc <- dict_biom$description[dict_biom$variable_name == "TRIGRESB" & grepl(paste0("^", level_with_zero, "\\."), dict_biom$description)]
+  if (length(desc) == 1) return(gsub(paste0("^", level_with_zero, "\\.\\s*"), "", desc))
+  else return(level)  # In case no matching description is found
+})
+
+# Update the levels of the TRIGRESB factor
+levels(combined_df$TRIGRESB) <- new_levels
+
+```
+
+
+
+
+
+```{r}
+# Define the custom plotting function
+plot_var <- function(var, text_size = 12) {
+  # Lookup the description for the variable in types_biom
+  var_description <- types_biom$description[types_biom$variable_name == var]
+  
+  # If the description isn't found, default to the variable name itself
+  if(length(var_description) == 0) {
+    var_description <- var
+  }
+  
+  # Continuous variables: Use boxplots
+  if (is.numeric(combined_df[[var]])) {
+    p <- ggplot(combined_df, aes(x = group, y = combined_df[[var]], fill = group)) +
+      geom_boxplot() +
+      labs(title = paste("Boxplot of", var_description, "by Group"), y = var, x = "Group") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = text_size)) +
+      scale_fill_manual(values = c("ind" = "#FF9999", "nonind" = "#99CCFF"))
+    
+    print(p)
+    
+  }
+  # Categorical variables: Use bar plots excluding NAs
+  else {
+    filtered_data <- combined_df[!is.na(combined_df[[var]]), ]
+    
+    p <- ggplot(filtered_data, aes(x = filtered_data[[var]], fill = group)) +
+      geom_bar(position = "dodge") +
+      labs(title = paste("Barplot of", var_description, "by Group"), y = "Count", x = var) +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = text_size)) +
+      scale_fill_manual(values = c("ind" = "#FF9999", "nonind" = "#99CCFF"))
+    
+    print(p)
+  }
+}
+
+# Your existing loop remains the same
+for (var in cvd) {
+  if (var == "DIAHBRSK") {
+    plot_var(var, text_size = 8)  # Adjust text size for DIAHBRSK
+  } else {
+    plot_var(var)  # Use default text size for other variables
+  }
+}
+
+```
+
+```{r}
+# Define a function to add labels for special points
+add_interest_points <- function(plot, var) {
+  if (var == "BMISC") {
+    plot <- plot +
+      geom_hline(yintercept = 18.5, linetype="dashed", color = "red") +
+      geom_hline(yintercept = 24.9, linetype="dashed", color = "red") +
+      geom_hline(yintercept = 29.9, linetype="dashed", color = "red") +
+      geom_text(aes(label = "Underweight", y = 17, x = "ind"), color = "blue") +
+      geom_text(aes(label = "Healthy Weight", y = 21.7, x = "ind"), color = "blue") +
+      geom_text(aes(label = "Overweight", y = 27.4, x = "ind"), color = "blue") +
+      geom_text(aes(label = "Obese", y = 32, x = "ind"), color = "blue")
+  }
+  
+  return(plot)
+```
+
+
+
+
