@@ -1,0 +1,322 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+DF setup
+```{r}
+# get nutrition col names present in aboriginal df
+nutr_ind = types_nutr$variable_name[types_nutr$variable_name %in% colnames(tech_abor)]
+nutr_nonind = types_nutr$variable_name[types_nutr$variable_name %in% colnames(tech_nutr)]
+names = intersect(nutr_ind, nutr_nonind)
+# subset 
+ind_nutr = tech_abor %>% select(all_of(names)) %>% mutate(group = 'ind')
+nonind_nutr = tech_nutr %>% select(all_of(names)) %>% mutate(group = 'nonind')
+# combine
+df = rbind(ind_nutr, nonind_nutr)
+df$group = as.factor(df$group)
+# Initialize a list to store columns to be removed
+cols_to_remove <- c()
+
+# Loop through each column
+for (col_name in colnames(df)) {
+  # If the column name has a "1" or ends with "1N"
+  if (grepl("1$", col_name) || grepl("1N$", col_name)) {
+    # Determine the counterpart column name with "2"
+    counterpart_col_name <- gsub("1$", "2", col_name)
+    counterpart_col_name <- gsub("1N$", "2N", counterpart_col_name)
+    
+    # Check if both columns exist and if we haven't already processed them
+    if (col_name %in% colnames(df) && counterpart_col_name %in% colnames(df) && !(col_name %in% cols_to_remove)) {
+      # Calculate mean of both columns and assign to new column with suffix "_mean"
+      mean_col_name <- paste0(gsub("[12]", "", col_name), "_mean")
+      
+      # Handle specific variables differently
+      if (col_name %in% c("B12T1", "B12T2")) {
+        mean_col_name <- ("B12_mean")
+      } else if (col_name %in% c("B1T1", "B1T2")) {
+        mean_col_name <- paste0("B1T_mean")
+      } else if (col_name %in% c("B2T1", "B2T2")) {
+        mean_col_name <- paste0("B2T_mean")
+      } else if (col_name %in% c("B3T1", "B3T2")) {
+        mean_col_name <- paste0("B3T_mean")
+      } else if (col_name %in% c("B6T1", "B6T2")) {
+        mean_col_name <- paste0("B6T_mean")
+      }
+      
+      df[[mean_col_name]] <- rowMeans(df[, c(col_name, counterpart_col_name)], na.rm = TRUE)
+      
+      # Store columns to be removed
+      cols_to_remove <- c(cols_to_remove, col_name, counterpart_col_name)
+    }
+  }
+}
+
+# Remove the original columns that had counterparts
+df <- df[, !colnames(df) %in% cols_to_remove]
+
+
+```
+
+
+
+```{r}
+# Initialize a list to store p-values
+ks_test_results <- list()
+test_cols <- setdiff(colnames(df), c("ABSHID", "group"))
+# Loop through each column and perform the Kolmogorov-Smirnov test
+for (col in test_cols) {
+  # Extract non-NA values for the current column
+  df_temp <- df[!is.na(df[[col]]), ]
+  
+  group_ind_values <- df_temp[[col]][df_temp$group == "ind"]
+  group_nonind_values <- df_temp[[col]][df_temp$group == "nonind"]
+  
+  # Perform the Kolmogorov-Smirnov test
+  test_result <- ks.test(group_ind_values, group_nonind_values)
+  
+  # Store p-value
+  ks_test_results[[col]] <- test_result$p.value
+}
+
+# Order variables by p-values
+ordered_vars_ks <- names(ks_test_results)[order(unlist(ks_test_results))]
+
+# Print variables with p-values less than 0.05 (or another chosen alpha level)
+significant_vars_ks <- ordered_vars_ks[unlist(ks_test_results)[order(unlist(ks_test_results))] < 0.01]
+sig_nutr_final = df %>% select(ABSHID, group, significant_vars_ks)
+print(significant_vars_ks)
+
+```
+
+
+```{r}
+# Initialize an empty dataframe
+summary_df <- data.frame(Variable = character(0), Indigenous = numeric(0), NonIndigenous = numeric(0), P_Value = numeric(0))
+
+# Loop through the variables from KS test results
+for (col in ordered_vars_ks) {
+  # Extract non-NA values for the current column
+  df_temp <- df[!is.na(df[[col]]), ]
+  
+  # Calculate medians for the two groups
+  Indigenous <- median(df_temp[[col]][df_temp$group == "ind"], na.rm = TRUE)
+  NonIndigenous <- median(df_temp[[col]][df_temp$group == "nonind"], na.rm = TRUE)
+  
+  # Extract p-value
+  p_val <- ks_test_results[[col]]
+  
+  # Append to the summary dataframe
+  summary_df <- rbind(summary_df, data.frame(Variable = col, Indigenous = Indigenous, NonIndigenous = NonIndigenous, P_Value = p_val))
+}
+
+# View the summary dataframe
+summary_df = summary_df %>% filter(P_Value < 0.01)
+
+```
+
+
+```{r}
+cols_to_remove <- c()
+mean_col_names = c()
+mean_col_descs = c()
+df1 = list()
+i = 1
+# Loop through each column
+for (col_name in types_nutr$variable_name) {
+  # If the column name has a "1"
+  if (grepl("1$", col_name) || grepl("1N$", col_name)) {
+    # Determine the counterpart column name with "2"
+    counterpart_col_name <- gsub("1$", "2", col_name)
+    counterpart_col_name <- gsub("1N$", "2N", counterpart_col_name)
+    
+    # Check if both columns exist and if we haven't already processed them
+    if (col_name %in% types_nutr$variable_name && counterpart_col_name %in% types_nutr$variable_name && !(col_name %in% cols_to_remove)) {
+            # Handle specific variables differently
+      if (col_name %in% c("B12T1", "B12T2")) {
+          mean_col_name <- ("B12_mean")
+          mean_col_desc = types_nutr$description[i]
+        } else if (col_name %in% c("B1T1", "B1T2")) {
+          mean_col_name <- paste0("B1T_mean")
+          mean_col_desc = types_nutr$description[i]
+        } else if (col_name %in% c("B2T1", "B2T2")) {
+          mean_col_name <- paste0("B2T_mean")
+          mean_col_desc = types_nutr$description[i]
+        } else if (col_name %in% c("B3T1", "B3T2")) {
+          mean_col_name <- paste0("B3T_mean")
+          mean_col_desc = types_nutr$description[i]
+        } else if (col_name %in% c("B6T1", "B6T2")) {
+          mean_col_name <- paste0("B6T_mean")
+          mean_col_desc = types_nutr$description[i]
+        }
+      else {
+        mean_col_name <- paste0(gsub("[12]", "", col_name), "_mean")
+        mean_col_desc = types_nutr$description[i]
+      }
+      df1 = rbind(df1, c(mean_col_name, mean_col_desc))
+      # Store columns to be removed
+      cols_to_remove <- c(cols_to_remove, col_name, counterpart_col_name)
+    }
+  }
+  if(!(col_name %in% cols_to_remove)){
+    unique_col_desc = types_nutr$description[i]
+    df1 = rbind(df1, c(col_name, unique_col_desc))
+  }
+  i = i + 1
+  
+}
+df1 = as.data.frame(df1)
+df1$V1 = as.character(df1$V1)
+df1$V2 = as.character(df1$V2)
+
+```
+
+```{r}
+
+df1$V2 = gsub("(?i)day\\s*1|\\s+", " ", df1$V2)
+```
+
+```{r}
+final = summary_df %>%
+  left_join(df1, by = c("Variable" = "V1"))
+# final$Variable[41] = "B2T_mean"
+```
+
+
+
+```{r}
+final = summary_df %>%
+  left_join(df1, by = c("Variable" = "V1"))
+final = final %>% mutate(diff = abs(Indigenous - NonIndigenous)) %>% filter(Indigenous != 0, NonIndigenous != 0)
+
+```
+
+
+```{r}
+# Energy
+energy_vars <- c("BMR", "EIBMR_mean", "ENERGYT_mean", "ENRGYT_mean", "MOISTT_mean")
+
+# Macronutrients
+macronutrient_vars <- c("PROTT_mean", "FATT_mean", "CHOWSAT_mean", "CHOWOAT_mean", "STARCHT_mean", 
+                        "SUGART_mean", "FIBRET_mean")
+
+# Vitamins
+vitamin_vars <- c("PREVAT_mean", "PROVAT_mean", "RETEQT_mean", "B1T_mean", "B2T_mean", 
+                  "B3T_mean", "NIACINT_mean", "FOLATT_mean", "FOLICT_mean", "TOTFOLT_mean",
+                  "FOLEQT_mean", "B6T_mean", "B12_mean", "VITCT_mean", "VITET_mean")
+
+# Minerals
+mineral_vars <- c("CALCT_mean", "IODINET_mean", "IRONT_mean", "MAGT_mean", "PHOST_mean",
+                  "POTAST_mean", "SELT_mean", "SODIUMT_mean", "ZINCT_mean")
+
+# Fats
+fat_vars <- c("CAFFT_mean", "CHOLT_mean", "SATFATT_mean", "MUFATT_mean", "PUFATT_mean",
+              "LAT_mean", "ALAT_mean", "LCN3T_mean", "TRANST_mean")
+
+# Percentage of Energy from Macronutrients
+energy_percentage_vars <- c("PROPER_mean", "FATPER_mean", "LAPER_mean", "ALAPER_mean",
+                            "CHOPER_mean", "SUGPER_mean", "STARPER_mean", "SATPER_mean",
+                            "TRANPER_mean", "FIBRPER_mean", "MONOPER_mean", "POLYPER_mean", "PEFRESD_mean", "PEADDSD_mean")
+
+energy_percentage_vars1 <- 
+  c( "FATPER_mean",  "CHOPER_mean", "SUGPER_mean",  "FIBRPER_mean", "PEADDSD_mean")
+
+
+# Food Groups
+food_groups_vars <- c("GRAINSN_mean", "VEGLEGN_mean", "FRUITN_mean", "DAIRYN_mean", "MEATN_mean", "MEATLN_mean",
+                      "WATERN_mean", "UNSATN_mean")
+
+food_groups_vars1 <- c("GRAINSN_mean", "VEGLEGN_mean", "FRUITN_mean",  "MEATN_mean","WATERN_mean", "UNSATN_mean")
+# Others
+other_vars <- c("FRESUGN_mean", "ADDSUGN_mean", "WATERGN_mean")
+
+# Grouping all variables
+group_names <- c('energy_vars', 'macronutrient_vars', 'vitamin_vars', 'mineral_vars', 'fat_vars',
+                   'energy_percentage_vars', 'food_groups_vars', 'other_vars')
+
+
+
+```
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+plot_nutrient_group <- function(data, nutrient_group, name) {
+  
+  # Reshape the dataframe to long format for plotting
+  data_long <- data %>%
+    gather(key = "Group", value = "Median", Indigenous, NonIndigenous)
+
+  # Filter data based on the nutrient group provided
+  df_group <- data_long[data_long$Variable %in% nutrient_group, ]
+  
+  # Remove the '()' from the V2 variable
+  df_group$V2 <- gsub("\\s*\\(.*\\)\\s*$", "", df_group$V2)
+
+  # Plot
+  p <- ggplot(df_group, aes(x = V2, y = Median, fill = Group)) +
+    geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+    coord_flip() +
+    labs(title = paste0("Analysis by Nutritional Group: ", name), y = "Median Value", x = "") +
+    theme_minimal() +
+    scale_fill_manual(values = c("Indigenous" = "lightblue", "NonIndigenous" = "pink"))
+  
+
+  return(p)
+}
+
+```
+
+```{r}
+plot_nutrient_group(final, energy_vars, "Energy")
+plot_nutrient_group(final, macronutrient_vars, "Macronutrients")
+plot_nutrient_group(final, vitamin_vars, "Vitamins")
+plot_nutrient_group(final, mineral_vars, "Minerals")
+plot_nutrient_group(final, fat_vars, "Fats")
+plot_nutrient_group(final, energy_percentage_vars, "Energy percentages")
+plot_nutrient_group(final, food_groups_vars, "Food groups")
+plot_nutrient_group(final, other_vars, "Other")
+
+```
+
+
+
+```{r}
+# Loop and plot dist for the variables based on KS test results
+for (col in (energy_percentage_vars1[energy_percentage_vars1 %in% ordered_vars_ks])) {
+  p <- ggplot(df, aes_string(x = col, fill = "group")) + 
+         geom_density(alpha = 0.5) + 
+         labs(title = col, y = "Density", x = "Value") + 
+         scale_fill_manual(values = c("lightblue", "pink"))  # Replace Group1Color and Group2Color with the appropriate colors
+  print(p)
+}
+```
+
+```{r}
+# final$V2 = gsub("[()]", "", final$V2)
+plot_nutrient_group(final, energy_percentage_vars1, "Energy percentages")
+plot_nutrient_group(final, food_groups_vars1, "Food groups")
+
+```
+
+```{r}
+# Combine the two vectors
+all_vars <- c(energy_percentage_vars1, food_groups_vars1)
+
+# Subset the dataframe based on the combined vectors
+subset_final <- final[final$Variable %in% all_vars, ]
+
+```
+
+
+
+
+
+```{r}
+sorted_nutr_p_df = final
+ save(sig_nutr_final, sorted_nutr_p_df,
+       file = "nutranalysis.Rdata")
+```
+
+

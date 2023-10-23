@@ -27,6 +27,12 @@ library(naniar)
 library(ggplot2)
 library(knitr)
 library(kableExtra)
+library(purrr)
+library(moments)  # for skewness function
+library(bestNormalize)
+library(car)
+library(caret)
+library(pROC)
 ```
 
 
@@ -482,6 +488,13 @@ dict_abor <- read.csv(here("data/aboriginal","dictionary.csv"),header=TRUE)
 ```
 
 
+PATCH 6 - FIX AGE COL NAME (realised that even though only household id is used to identify, they are still individuals (not households; same household id is repeated for different individuals) - might have to check other variables)
+
+```{r}
+raw_abor$AGEC = raw_abor$AGEEC
+```
+
+
 ```{r}
 # Function to find descriptions
 find_descriptions <- function(col_names, dictionaries) {
@@ -612,8 +625,8 @@ aborig_household_dict = dict_abor
       tech_nutr, dict_nutr, types_nutr,
       tech_food, dict_food, types_food,
       dict_food_class, biom_nutr_food,
-      tech_abor,aborig_household_dict, 
-      file = "p5.Rdata")
+      tech_abor,aborig_household_dict,
+      file = "p6.Rdata")
 ```
 
 

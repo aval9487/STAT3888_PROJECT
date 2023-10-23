@@ -1,0 +1,268 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+biom_ind = types_biom$variable_name[types_biom$variable_name %in% colnames(tech_abor)]
+biom_nonind = types_biom$variable_name[types_biom$variable_name %in% colnames(biom_nutr_food)]
+
+names = intersect(biom_ind, biom_nonind)
+# subset 
+ind_biom = tech_abor %>% select(all_of(names)) %>% mutate(group = 'Indigenous')
+nonind_biom = biom_nutr_food %>% select(all_of(names)) %>% mutate(group = 'NonIndigenous')
+```
+
+
+```{r}
+
+for (col_name in names(ind_biom)) {
+  # Skip the 'group' column as it doesn't need to be changed
+  if (col_name != "group") {
+    target_class <- class(nonind_biom[[col_name]])
+    
+    # Check if the classes are different
+    if (class(ind_biom[[col_name]]) != target_class) {
+      # Coerce to the target class
+      if (target_class == "factor") {
+        ind_biom[[col_name]] <- as.factor(ind_biom[[col_name]])
+      } else if (target_class == "numeric") {
+        ind_biom[[col_name]] <- as.numeric(as.character(ind_biom[[col_name]]))  # Convert to character first to avoid potential issues
+      } else if (target_class == "integer") {
+        ind_biom[[col_name]] <- as.integer(as.character(ind_biom[[col_name]]))  # Convert to character first
+      } else if (target_class == "character") {
+        ind_biom[[col_name]] <- as.character(ind_biom[[col_name]])
+      }  # Add more cases if there are more data types you need to handle
+    }
+  }
+}
+
+```
+
+
+
+
+```{r}
+# Convert variables in nonind_biom to match those in ind_biom
+for (var in names(ind_biom)) {
+  if (is.integer(ind_biom[[var]])) {
+    nonind_biom[[var]] <- as.integer(as.character(nonind_biom[[var]]))
+  } 
+  else if (is.numeric(ind_biom[[var]])) {
+    nonind_biom[[var]] <- as.numeric(as.character(nonind_biom[[var]]))
+  }
+}
+
+
+# Combine the dataframes
+df = rbind(ind_biom, nonind_biom)
+df$group = as.factor(df$group)
+df = df %>% filter(AGEC >=18)
+
+```
+
+
+
+```{r}
+for (var in names(df)) {
+  # Check the type of the variable from types_biom
+  var_type <- subset(types_biom, variable_name == var)$variable_type
+  
+  if (length(var_type) == 0) {
+    next  # skip if the variable is not found in types_biom
+  }
+  
+  if (var_type == "string") {
+    df[[var]] <- as.character(df[[var]])
+  } else if (var_type == "continuous") {
+    df[[var]] <- as.numeric(df[[var]])
+  } else if (var_type == "categorical") {
+    # Fetch the descriptions for the variable from dict_biom
+    descriptions <- subset(dict_biom, variable_name == var)$description
+    
+    # Extract codes from the descriptions
+    codes <- as.numeric(sub("([0-9]+)\\..*", "\\1", descriptions))
+    
+    # Exclude the rows with NA (which would be the ones that don't have codes)
+    valid_rows <- !is.na(codes)
+    descriptions <- descriptions[valid_rows]
+    codes <- codes[valid_rows]
+    
+    # The first valid entry after filtering might be a definition, so we should check and remove it
+    if(!grepl("^[0-9]+\\.", descriptions[1])){
+      descriptions <- descriptions[-1]
+      codes <- codes[-1]
+    }
+    
+    # Create a named vector to map the levels
+    level_mapping <- setNames(descriptions, codes)
+    
+    # Convert the variable to a factor and set the levels
+    df[[var]] <- factor(df[[var]], levels = as.character(codes), labels = descriptions)
+  }
+}
+```
+
+```{r}
+cvd <- c(
+  "PHDCMWBC",
+  "BMISC",
+  "TRIGNTR", "TRIGRESB",
+  "DIAHBRSK",
+  "SYSTOL",
+  "DIASTOL",
+  "HDLCHREB",
+  "LDLNTR", "LDLRESB",
+  "APOBNTR"
+)
+```
+
+
+
+```{r}
+
+# Filter and create flags
+filtered_df <- df %>%
+  mutate(
+    # Obesity conditions
+    BMI_Category = as.factor(case_when(
+      BMISC < 18.5 ~ "Underweight",
+      BMISC >= 18.5 & BMISC <= 24.9 ~ "Healthy Weight",
+      BMISC > 24.9 & BMISC <= 29.9 ~ "Overweight",
+      BMISC > 30 ~ "Obese",
+      TRUE ~ NA_character_
+    )),
+    Obesity_Waist = as.factor(case_when(
+      SEX == "1. Male" & PHDCMWBC > 102 ~ "Obese_WC_Men",
+      SEX == "2. Female" & PHDCMWBC > 88 ~ "Obese_WC_Women",
+      TRUE ~ NA_character_
+    )),
+    
+    # Hypertension conditions
+    Hypertension = as.factor(case_when(
+      SYSTOL > 140 | DIASTOL > 90 ~ "Hypertensive",
+      SYSTOL <= 140 & DIASTOL <= 90 ~ "Non-Hypertensive",
+      TRUE ~ NA_character_
+    )),
+    
+    # Diabetes conditions
+    Diabetes_HbA1C = as.factor(case_when(
+      HBA1PREB %in% c("5. 6.5 to less than 7.0", "6. 7.0 or more") ~ "Diabetic",
+      TRUE ~ NA_character_
+    )),
+    Diabetes_FastingGlucose = as.factor(case_when(
+      GLUCFPD %in% c("4. 5.6 to less than 6.0", "5. 6.0 to less than 6.9") ~ "Impaired Fasting Glucose",
+      TRUE ~ NA_character_
+    ))
+  )
+
+```
+
+
+
+```{r}
+filtered_variables_to_visualize <- c("BMI_Category", "Obesity_Waist", "Hypertension", 
+                                     "Diabetes_HbA1C", "Diabetes_FastingGlucose", 
+                                     "PHDCMWBC", "TRIGNTR", "DIAHBRSK", "HDLCHREB", 
+                                     "LDLNTR", "APOBNTR")
+
+
+```
+
+```{r}
+# Define the custom plotting function
+plot_var <- function(var, text_size = 12) {
+  # Lookup the description for the variable in types_biom
+  var_description <- types_biom$description[types_biom$variable_name == var]
+  
+  # If the description isn't found, default to the variable name itself
+  if(length(var_description) == 0) {
+    var_description <- var
+  }
+  
+  # Continuous variables: Use boxplots
+  if (is.numeric(filtered_df[[var]])) {
+    p <- ggplot(filtered_df, aes(x = group, y = filtered_df[[var]], fill = group)) +
+      geom_boxplot() +
+      labs(title = paste("Boxplot of", var_description, "by Group"), y = var, x = "Group") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = text_size)) +
+      scale_fill_manual(values = c("Indigenous" = "#FF9999", "NonIndigenous" = "#99CCFF"))
+    
+    print(p)
+    
+  }
+  # Categorical variables: Use bar plots excluding NAs
+  else {
+    filtered_data <- filtered_df[!is.na(filtered_df[[var]]), ]
+    
+    p <- ggplot(filtered_data, aes(x = filtered_data[[var]], fill = group)) +
+      geom_bar(position = "fill") +  # Use 'fill' to plot proportions
+      labs(title = paste("Barplot of", var_description, "by Group"), y = "Proportion", x = var) +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = text_size)) +
+      scale_fill_manual(values = c("Indigenous" = "#FF9999", "NonIndigenous" = "#99CCFF"))
+    
+    print(p)
+  }
+}
+
+# Your existing loop remains the same
+for (var in filtered_variables_to_visualize) {
+  if (var == "DIAHBRSK") {
+    plot_var(var, text_size = 8)  # Adjust text size for DIAHBRSK
+  } else {
+    plot_var(var)  # Use default text size for other variables
+  }
+}
+
+```
+
+```{r}
+filtered_variables_to_visualize <- c("BMI_Category", "Obesity_Waist", "Hypertension", 
+                                     "Diabetes_HbA1C", "PHDCMWBC", "TRIGNTR", 
+                                     "DIAHBRSK", "HDLCHREB", "LDLNTR", "APOBNTR")
+
+# Initialize an empty vector to store the significant variables
+sig_vars <- c()
+p_value_df <- data.frame(variable = character(), p_value = numeric())
+
+for (var in filtered_variables_to_visualize) {
+  
+  # Subset the data
+  x <- filtered_df %>% select(var, group)
+  
+  # If the variable is a factor, drop the specified levels and perform statistical testing
+  if (is.factor(x[[var]])) {
+    # Drop the unwanted levels
+    unwanted_levels <- c("0. Not applicable", "7. Not applicable", "8. Not reported")
+    x[[var]] <- factor(x[[var]], levels = setdiff(levels(x[[var]]), unwanted_levels))
+    
+    # Perform Chi-squared test
+    chisq_result <- chisq.test(table(x[[var]], x$group))
+    p_value_df <- rbind(p_value_df, data.frame(variable = var, p_value = chisq_result$p.value))
+    
+    # If the p-value is less than 0.05, add the variable name to the sig_vars vector
+    if (chisq_result$p.value < 0.05) {
+      sig_vars <- c(sig_vars, var)
+    }
+  }
+}
+sorted_biom_p_df <- p_value_df %>% arrange(p_value)
+
+# Now that we have our significant variable names in sig_vars, we subset the original dataframe
+sig_biom_final <- filtered_df %>% select(ABSHID, group, SEX, SMKDAILY, all_of(sig_vars))
+```
+
+
+```{r}
+save(sig_biom_final, sorted_biom_p_df,
+       file = "biomanalysis.Rdata")
+
+```
+
+
+
+
+

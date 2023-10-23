@@ -1,0 +1,207 @@
+---
+title: "relation"
+output: html_document
+date: "2023-10-23"
+---
+
+```{r}
+cvdnutr <- sig_biom_final %>%
+  left_join(sig_nutr_final %>% select(-group), by = "ABSHID")
+```
+
+First look at 'CVD risk factor' proportions in groups
+
+```{r}
+criteria_proportions <- cvdnutr %>%
+  # Group by 'group' (assuming your column name for grouping is 'group')
+  group_by(group) %>%
+  # Calculate the counts for each criteria
+  summarise(
+    Total = n(),
+    Current_or_Past_Smoker = sum(SMKDAILY %in% c("1. Current daily smoker", "2. Past daily smoker (still smokes)"), na.rm = TRUE) / Total,
+    Obese_BMI = sum(BMI_Category == "Obese", na.rm = TRUE) / Total,
+    Obesity_Waist_Men_or_Women = sum(Obesity_Waist %in% c("Obese_WC_Men", "Obese_WC_Women"), na.rm = TRUE) / Total,
+    Hypertensive = sum(Hypertension == "Hypertensive", na.rm = TRUE) / Total,
+    Diabetic_HbA1C = sum(Diabetes_HbA1C == "Diabetic", na.rm = TRUE) / Total,
+    Abnormal_triglycerides = sum(TRIGNTR == "2. Abnormal triglycerides", na.rm = TRUE) / Total,
+    Diabetes_HbA1c_high = sum(DIAHBRSK == "3. Indicates diabetes - HbA1c greater than or equal to 6.5%", na.rm = TRUE) / Total,
+    HDLCHREB_Less_than_1 = sum(HDLCHREB == "1. Less than 1.0", na.rm = TRUE) / Total,
+    Abnormal_LDL_cholesterol = sum(LDLNTR == "2. Abnormal LDL cholesterol", na.rm = TRUE) / Total,
+    Abnormal_ApoB = sum(APOBNTR == "2. Abnormal ApoB", na.rm = TRUE) / Total
+  ) %>%
+  select(-Total) # Removing the total column since we don't need it in the output
+
+# Print the resulting table
+criteria_proportions
+
+```
+
+```{r}
+# Convert the data to a long format
+long_data <- criteria_proportions %>%
+  gather(key = "Criteria", value = "Proportion", -group) %>%
+  filter(Proportion != 1)  # Exclude proportions that equal 1
+
+# Plot the data
+ggplot(long_data, aes(x = Criteria, y = Proportion, fill = group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +  # Flip axes for better visibility with long criterion names
+  labs(title = "Proportions of CVD Risk Criteria by Group",
+       y = "Proportion",
+       x = "") +
+  theme_minimal() +
+  scale_fill_manual(values = c("lightblue", "pink"))  # Adjust colors if needed
+
+```
+
+Appears that Indigenous has a higher risk of cvd:
+```{r}
+# List of criteria
+criteria <- list(
+  Current_or_Past_Smoker = cvdnutr$SMKDAILY %in% c("1. Current daily smoker", "2. Past daily smoker (still smokes)"),
+  Obese_BMI = cvdnutr$BMI_Category == "Obese",
+  Obesity_Waist_Men_or_Women = cvdnutr$Obesity_Waist %in% c("Obese_WC_Men", "Obese_WC_Women"),
+  Hypertensive = cvdnutr$Hypertension == "Hypertensive",
+  Diabetic_HbA1C = cvdnutr$Diabetes_HbA1C == "Diabetic",
+  Abnormal_triglycerides = cvdnutr$TRIGNTR == "2. Abnormal triglycerides",
+  Diabetes_HbA1c_high = cvdnutr$DIAHBRSK == "3. Indicates diabetes - HbA1c greater than or equal to 6.5%",
+  HDLCHREB_Less_than_1 = cvdnutr$HDLCHREB == "1. Less than 1.0",
+  Abnormal_LDL_cholesterol = cvdnutr$LDLNTR == "2. Abnormal LDL cholesterol",
+  Abnormal_ApoB = cvdnutr$APOBNTR == "2. Abnormal ApoB"
+)
+
+# Function to perform Chi-squared test and return p-value
+test_criteria <- function(criterion) {
+  table_data <- table(cvdnutr$group, criterion)
+  test_result <- chisq.test(table_data)
+  return(test_result$p.value)
+}
+
+# Apply the function to all criteria and get p-values
+p_values <- sapply(criteria, test_criteria)
+
+# Adjust p-values for multiple comparisons using Bonferroni method
+adjusted_p_values <- p.adjust(p_values, method = "bonferroni")
+
+# Print criteria that are significant at 0.05 level after adjustment
+significant_criteria <- names(adjusted_p_values)[adjusted_p_values < 0.05]
+
+```
+
+
+
+Lets define high risk cvd as satisfying at least two of the CVD criteria:
+
+```{r}
+cvdnutr$cvd_risk <- ifelse(
+  (ifelse(!is.na(cvdnutr$SMKDAILY) & cvdnutr$SMKDAILY %in% c("1. Current daily smoker", "2. Past daily smoker (still smokes)"), 1, 0) +
+  ifelse(!is.na(cvdnutr$BMI_Category) & cvdnutr$BMI_Category == "Obese", 1, 0) +
+  ifelse(!is.na(cvdnutr$Obesity_Waist) & cvdnutr$Obesity_Waist %in% c("Obese_WC_Men", "Obese_WC_Women"), 1, 0) +
+  ifelse(!is.na(cvdnutr$Hypertension) & cvdnutr$Hypertension == "Hypertensive", 1, 0) +
+  ifelse(!is.na(cvdnutr$Diabetes_HbA1C) & cvdnutr$Diabetes_HbA1C == "Diabetic", 1, 0) +
+  ifelse(!is.na(cvdnutr$TRIGNTR) & cvdnutr$TRIGNTR == "2. Abnormal triglycerides", 1, 0) +
+  ifelse(!is.na(cvdnutr$DIAHBRSK) & cvdnutr$DIAHBRSK == "3. Indicates diabetes - HbA1c greater than or equal to 6.5%", 1, 0) +
+  ifelse(!is.na(cvdnutr$HDLCHREB) & cvdnutr$HDLCHREB == "1. Less than 1.0", 1, 0) +
+  ifelse(!is.na(cvdnutr$LDLNTR) & cvdnutr$LDLNTR == "2. Abnormal LDL cholesterol", 1, 0) +
+  ifelse(!is.na(cvdnutr$APOBNTR) & cvdnutr$APOBNTR == "2. Abnormal ApoB", 1, 0)) >= 2, "high", "low")
+```
+
+```{r}
+# can see that the cvd_risk levels are balanced in the whole data:
+table(cvdnutr$cvd_risk)
+```
+
+
+Now ready to see if we can explain the higher risk of cvd in the Indigenous group using the nutrition variables:
+
+```{r}
+table(cvdnutr$cvd_risk, cvdnutr$group)
+```
+
+
+```{r}
+# Split the data into training and test sets (70% training, 30% test)
+set.seed(123)  # Setting a seed for reproducibility
+splitIndex <- createDataPartition(cvdnutr$cvd_risk, p = .7, list = FALSE)
+train_data <- cvdnutr[splitIndex, ]
+test_data <- cvdnutr[-splitIndex, ]
+train_data$cvd_risk <- ifelse(train_data$cvd_risk == "high", 1, 0)
+test_data$cvd_risk <- ifelse(test_data$cvd_risk == "high", 1, 0)
+
+```
+
+
+```{r}
+# Get nutrition variable names
+nutr_vars <- setdiff(colnames(sig_nutr_final), c("ABSHID", "group"))
+
+# Fit the model
+model_diet <- glm(cvd_risk ~ ., 
+                   data = train_data %>% select(cvd_risk, all_of(nutr_vars), group), 
+                   family = "binomial")
+
+
+# Extract coefficients from the model
+coef_summary <- summary(model_diet)$coefficients
+# 
+# nonsig_nutr_vars <- rownames(coef_summary)[coef_summary[, 4] > 0.05] # find vars with p-value > 0.05 to remove (see if this improves fit)
+# 
+# 
+# # Remove these variables from the significant predictors list
+# sig_nutr_vars <- setdiff(nutr_vars, nonsig_nutr_vars)
+# 
+# # Refit the model without these variables
+# model_diet1 <- glm(cvd_risk ~ ., data = train_data %>% select(cvd_risk, all_of(sig_nutr_vars), group), family = "binomial")
+```
+
+
+
+
+```{r}
+
+# Predict probabilities
+probabilities <- predict(model_diet, type = "response", newdata = test_data)
+
+# Convert to binary prediction based on a threshold (0.5 is common)
+predicted_values <- ifelse(probabilities > 0.5, 1, 0)
+
+# Confusion Matrix
+table(test_data$cvd_risk, predicted_values)
+
+# ROC curve
+roc_obj <- roc(test_data$cvd_risk, probabilities)
+auc(roc_obj)
+plot(roc_obj, main="ROC Curve")
+
+# Residuals
+standardized_residuals <- rstandard(model_diet)
+
+# Plot residuals
+plot(predict(model_diet), standardized_residuals, 
+     main="Residuals vs Fitted", xlab="Fitted values", ylab="Standardized residuals")
+abline(h = 0, col = "red")
+
+# Leverage and Cook's distance
+influence_measures <- influence.measures(model_diet)
+plot(influence_measures$is.inf, main="Influence Measures")
+
+```
+
+```{r}
+library(caret)
+
+# Generate confusion matrix
+cm <- confusionMatrix(as.factor(predicted_values), as.factor(test_data$cvd_risk))
+
+# Print the confusion matrix and related statistics
+print(cm)
+
+```
+
+
+
+```{r}
+# Use stepwise regression for variable selection
+# stepwise_selected_model <- step(full_model, direction = "both", trace = 0)
+```
+
