@@ -54,7 +54,8 @@ for (col_name in colnames(df)) {
 
 # Remove the original columns that had counterparts
 df <- df[, !colnames(df) %in% cols_to_remove]
-
+# PATCH 7
+df = df %>% select(-ABSHID)
 
 ```
 
@@ -63,7 +64,7 @@ df <- df[, !colnames(df) %in% cols_to_remove]
 ```{r}
 # Initialize a list to store p-values
 ks_test_results <- list()
-test_cols <- setdiff(colnames(df), c("ABSHID", "group"))
+test_cols <- setdiff(colnames(df), c("ABSPID", "group"))
 # Loop through each column and perform the Kolmogorov-Smirnov test
 for (col in test_cols) {
   # Extract non-NA values for the current column
@@ -84,7 +85,7 @@ ordered_vars_ks <- names(ks_test_results)[order(unlist(ks_test_results))]
 
 # Print variables with p-values less than 0.05 (or another chosen alpha level)
 significant_vars_ks <- ordered_vars_ks[unlist(ks_test_results)[order(unlist(ks_test_results))] < 0.01]
-sig_nutr_final = df %>% select(ABSHID, group, significant_vars_ks)
+sig_nutr_final = df %>% select(ABSPID, group, significant_vars_ks)
 print(significant_vars_ks)
 
 ```
@@ -239,8 +240,6 @@ group_names <- c('energy_vars', 'macronutrient_vars', 'vitamin_vars', 'mineral_v
 ```
 
 ```{r}
-library(ggplot2)
-library(tidyr)
 
 plot_nutrient_group <- function(data, nutrient_group, name) {
   
@@ -310,13 +309,10 @@ subset_final <- final[final$Variable %in% all_vars, ]
 ```
 
 
-
-
-
 ```{r}
 sorted_nutr_p_df = final
  save(sig_nutr_final, sorted_nutr_p_df,
-       file = "nutranalysis.Rdata")
+       file = "nutranalysisFinalP7.Rdata")
 ```
 
 
