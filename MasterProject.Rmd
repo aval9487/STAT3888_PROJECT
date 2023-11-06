@@ -1,0 +1,1502 @@
+---
+title: "Master Project"
+author: 'SID: 500505887'
+date: "2023-11-06"
+output: 
+  html_document:
+    code_folding: hide
+    number_sections: true
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+set.seed(123)
+```
+
+
+# Data Wrangling
+## Libraries
+```{r Libararies, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(here)      # 
+library(readxl)    
+library(janitor)   
+library(stringr)   
+library(tidyr) 
+library(dplyr)
+library(naniar)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(purrr)
+library(moments)  
+library(bestNormalize)
+library(car)
+library(caret)
+library(pROC)
+library('finalfit')
+library(gridExtra)
+library(grid)
+```
+
+
+## Functions
+
+### Label variables as continuous and categorical
+```{r F1}
+get_type <- function(dict) 
+{
+  #dict <- dict_nutr
+  var_names <- unique(dict$variable_name)
+  var_type  <- c()
+  for (j in 1:length(var_names))
+  {
+    # Get all dictionary lines corresponding to a varible
+    # (a block of lines)
+    dict_block <- dict %>% 
+      filter(variable_name==var_names[j])
+    
+    # Take all of the characters in a block, paste them 
+    # together and make all characters lower case
+    block_string <- dict_block %>%
+      select(-variable_name) %>%
+      as.matrix() %>%
+      as.vector() %>%
+      paste(collapse="") %>%
+      tolower()
+    
+    # Assign variable if we can find the word "continuous"
+    # in the block otherwise assume that it is "categorical"
+    var_type[j] <- block_string %>% 
+      str_detect("continuous") %>% 
+      ifelse("continuous","categorical") 
+  }
+  return(var_type)
+}
+```
+
+
+### Split the description variable in the data dictionary into value and meaning columns 
+
+(* Modified from given)
+```{r F2}
+get_my_special_value_meanings <- function(dict) {
+  special <- tibble(variable_name = c(),
+                    value = c(),
+                    meaning = c())
+  
+  for (i in 1:nrow(dict)) {
+    variable <- dict$variable_name[i]
+    description <- tolower(dict$description[i])  # Convert description to lowercase
+    
+    # Check if description contains "continuous"
+    if (grepl("continuous", description)) {
+      next  # Skip entries with "continuous" in description
+    }
+    
+    # Check if description starts with a number followed by a period and space
+    if (grepl("^\\d+\\. ", description)) {
+      # Extract value and meaning using pattern matching
+      values <- str_match(description, "^(\\d+\\. )(.*)")
+      value <- values[2]
+      meaning <- values[3]
+      
+      result <- tibble(variable_name = variable,
+                       value = value,
+                       meaning = meaning)
+      
+      special <- bind_rows(special, result)
+    } else {
+      # If description doesn't follow the pattern, treat the whole description as meaning
+      result <- tibble(variable_name = variable,
+                       value = NA,
+                       meaning = description)
+      
+      special <- bind_rows(special, result)
+    }
+  }
+  
+  return(special)
+}
+```
+
+Split the description variable in the data dictionary into value and meaning columns 
+(* Original)
+```{r F3}
+get_special_value_meanings <- function(dict)
+{
+  var_names <- unique(dict$variable_name)
+  special   <- tibble(variable_name=c(),
+                      value=c(),
+                      meaning=c())
+  
+  for (j in 1:length(var_names)) 
+  {
+    # Get a block of values from the dictionary
+    block <-  dict %>%
+      filter(variable_name==var_names[j])
+  
+    if (nrow(block)>1) {
+      # Split  the descrition into value/meaning pairs
+      special_block <- block[-1,-c(3:ncol(block))] %>%
+        dplyr::filter(!grepl("continuous",tolower(description))) %>%
+        separate(col=2, 
+                 sep="[.]",
+                 into=c("value","meaning")) %>%
+        mutate(value=as.numeric(value),
+               meaning=tolower(str_trim(meaning))) 
+      
+      # append these to a block of special value/meaning pairs
+      special <- bind_rows(special, special_block)
+    }
+  }
+  return(special)
+}
+```
+
+
+### Label all categorical variables and convert them to factors in R.
+```{r F4}
+categorical_to_factor <- function(types, proc) 
+{
+  var_names <- colnames(proc)  
+  for (i in 1:length(var_names)) 
+  {
+    # Extract the inferred variable type from the types tibble
+    var_type <- types %>% 
+      filter(variable_name==var_names[i]) %>%
+      select(variable_type) %>%
+      as.character()
+    
+    # If the type is categorical turn the variable into a factor
+    if (var_type=="categorical") {
+      proc[[var_names[i]]] <- as.factor(proc[[var_names[i]]])
+    }
+  }
+  return(proc)
+}
+```
+
+
+### Convert raw data to technically correct data
+```{r F5}
+miss_defs <- c("Did not proceed to Biomedical component",
+                     "Measurement not taken - equipment faulty",
+                     "Measurement not taken - other reason",
+                     "Measurement not taken - refusal",
+                     "None of these apply",
+                     "Not applicable",
+                     "Not collected",
+                     "Not currently on a diet",
+                     "Not determined",
+                     "Not known",
+                     "Not known if currently on a diet",
+                     "Not measured",
+                     "Not reported",
+                     "Not used",
+                     "Not stated")
+raw_to_tech <- function(proc, special, types)
+{
+  var_names <- colnames(proc)
+  for (j in 1:length(var_names)) 
+  {
+    var_val <- var_names[j]
+    specials <- special %>%
+      filter(variable_name==var_val)
+    if (nrow(specials)>0) 
+    {
+      ind <- which(var_names==var_val)
+      var_miss_str  <- paste0(var_val,"_MISS")
+      var_miss_reas <- rep("observed",nrow(proc))
+      var_vals      <- proc[,ind]
+      var_type <- types %>% 
+        filter(variable_name==var_val) %>%
+        select(variable_type) %>%
+        as.character()
+      if (var_type=="continuous") {
+        for (i in 1:length(var_vals)) {
+          if (var_vals[i] %in% specials$value) {
+            ind2 <- which(var_vals[i]==specials$value)
+            var_vals[i]      <- NA
+            var_miss_reas[i] <- specials[ind2,3] %>% as.character()
+          }
+        }
+      }
+      if (var_type=="categorical") {
+        for (i in 1:length(var_vals)) {
+          spec_val  <- specials$value
+          spec_meam <- specials$meaning
+          if (var_vals[i] %in% spec_val) 
+          {
+            var_mean <- spec_meam[var_vals[i] == spec_val]
+            if (var_mean %in% miss_defs) {
+              var_vals[i]      <- NA
+              var_miss_reas[j] <- var_mean
+            }
+          } else {
+            var_vals[i]      <- NA
+            var_miss_reas[i] <- "unknown"
+          }
+        }
+      }
+      if (any(is.na(var_vals))) {
+        proc[,ind] <- var_vals
+        proc$dummy <- var_miss_reas
+        colnames(proc)[ncol(proc)] <- var_miss_str
+      }
+    }
+  }
+  return(proc)
+}
+```
+
+
+
+
+
+## Technically correct pipeline
+```{r Wrangle pipeline, warning=FALSE, message=FALSE}
+#read in raw data
+raw_biom <- read.csv(here("data","AHS11biomedical.csv"), header=TRUE)
+raw_nutr <- read.csv(here("data","AHS11nutrient.csv"), header=TRUE)
+raw_food <- read.csv(here("data","AHS11food.csv"), header=TRUE)
+
+quiet_read <- purrr::quietly(readxl::read_excel) # returns [result, output, messages, warning] of a function
+
+# read in dics for raw data
+dict_biom <- quiet_read(here("data","nutmstatDataItems2019.xlsx"),sheet=1)$result
+dict_nutr <- quiet_read(here("data","nutmstatDataItems2019.xlsx"),sheet=2)$result
+dict_food <- quiet_read(here("data","nutmstatDataItems2019.xlsx"),sheet=3)$result
+
+# clean var names
+dict_biom <- dict_biom %>% janitor::clean_names() %>% rename(extra=x3)
+dict_nutr <- dict_nutr %>% janitor::clean_names() %>% rename(extra1=x3,extra2=x4) 
+dict_food <- dict_food %>% janitor::clean_names() %>% rename(extra=x3) 
+
+# remove empty rows
+dict_biom <- dict_biom %>% janitor::remove_empty("rows")
+dict_nutr <- dict_nutr %>% janitor::remove_empty("rows")
+dict_food <- dict_food %>% janitor::remove_empty("rows")
+
+# Create datasets with human readable versions of the variable names
+biom_readable <- dict_biom %>% 
+  filter(!is.na(variable_name))  
+nutr_readable <- dict_nutr %>% 
+  filter(!is.na(variable_name)) %>% 
+  distinct() # Removes 1 duplicate
+food_readable <- dict_food %>% 
+  filter(!is.na(variable_name)) %>% 
+  distinct()
+
+#Fill in blanks in the variable names
+dict_biom <- dict_biom %>% tidyr::fill(variable_name)
+dict_nutr <- dict_nutr %>% tidyr::fill(variable_name)
+dict_food <- dict_food %>% tidyr::fill(variable_name)  
+
+var_names_biom <- unique(dict_biom$variable_name)
+var_names_nutr <- unique(dict_nutr$variable_name)
+var_names_food <- unique(dict_food$variable_name)
+
+# Try to infer the data types from the data dictionary
+tib1 <- tibble(variable_type=get_type(dict_biom))
+tib2 <- tibble(variable_type=rep("continuous",nrow(nutr_readable)))
+tib3 <- tibble(variable_type=get_type(dict_food))
+
+# Create a new tibble that takes the readable tibble,
+# appends the variable type, and do some minor fixing
+types_biom <- bind_cols(biom_readable, tib1) %>%
+  mutate(variable_type=ifelse(var_names_biom%in%c("ABSPID","ABSHID"), "string",variable_type))
+
+types_nutr <- bind_cols(nutr_readable, tib2) %>%
+  mutate(variable_type=ifelse(variable_name%in%c("ABSPID","ABSHID"), "string",variable_type))
+
+types_food <- bind_cols(food_readable, tib3) %>%
+  mutate(variable_type=ifelse(variable_name%in%c("ABSPID","ABSHID"), "string",variable_type)) 
+#============================================================
+# BIOM DATA
+# Made modification to get_special_value_meanings: descriptions for some categorical values (e.g., GLUCFREB) weren't translating correctly (*)
+special_biom_new <- get_my_special_value_meanings(dict_biom)
+special_biom_new$value <- gsub("\\.", "", special_biom_new$value)  # Remove all dots from the 'value' column
+
+# Remove descriptions
+special_biom_new <- special_biom_new %>% 
+  filter(!is.na(value)) 
+
+# Convert values to numeric
+special_biom_new$value = as.numeric(special_biom_new$value)
+#============================================================
+#Trying my modified function with the other raw (found it doesnt work):
+# special_nutr <- get_my_special_value_meanings(dict_nutr) %>% na.omit()
+# special_food <- get_my_special_value_meanings(dict_food) %>% na.omit()
+#============================================================
+#Using Johns with raw nutr and fodd:
+special_nutr <- get_special_value_meanings(dict_nutr) %>% na.omit()
+special_food <- get_special_value_meanings(dict_food) %>% na.omit()
+#============================================================
+# PATCH 3 (*)
+miss_defs = tolower(miss_defs) #Adds _MISS vars for COMBCODE and EATOCC
+#============================================================
+
+proc_biom <- categorical_to_factor(types_biom,raw_biom)
+proc_nutr <- categorical_to_factor(types_nutr,raw_nutr)
+proc_food <- categorical_to_factor(types_food,raw_food)
+
+# Convert biom data to technically correct
+tech_biom <- raw_to_tech(proc_biom, special_biom_new, types_biom)
+tech_nutr <- raw_to_tech(proc_nutr, special_nutr, types_nutr)
+tech_food <- raw_to_tech(proc_food, special_food, types_food)
+```
+
+
+
+## Patches
+### PATCH 1 - FIX EXERCISE COLUMNS
+```{r Patch1}
+# Convert 'phys', 'mod', and 'vig' columns to numeric and create corresponding '_MISS' columns
+# deliberately keeping 9996 and 9999 and desc in _MISS vars because could need them later
+
+# Convert 'phys', 'mod', and 'vig' columns to numeric and create corresponding '_MISS' columns
+tech_biom_mod <- tech_biom %>%
+  mutate(
+    phys_num = as.numeric(as.character(EXLWTBC)),
+    mod_num = as.numeric(as.character(EXLWMBC)),
+    vig_num = as.numeric(as.character(EXLWVBC)),
+    phys_MISS = ifelse(phys_num %in% c(9996, 9999), as.character(phys_num), "observed"),
+    mod_MISS = ifelse(mod_num %in% c(9996, 9999), as.character(mod_num), "observed"),
+    vig_MISS = ifelse(vig_num %in% c(9996, 9999), as.character(vig_num), "observed")
+  )
+
+# Replace entries in 'phys', 'mod', and 'vig' columns with NA where values are 9996 or 9999
+tech_biom_mod$phys_num[tech_biom_mod$phys_num %in% c(9996, 9999)] <- NA
+tech_biom_mod$mod_num[tech_biom_mod$mod_num %in% c(9996, 9999)] <- NA
+tech_biom_mod$vig_num[tech_biom_mod$vig_num %in% c(9996, 9999)] <- NA
+
+
+tech_biom = tech_biom_mod %>% select(
+  -c(EXLWTBC, EXLWMBC, EXLWVBC)
+)
+```
+
+
+### PATCH 2 - Link Food Class to Food data
+```{r Patch2}
+df <- tech_food %>%
+  select(
+    FOODCODC,
+    FIVDIG,
+    THRDIG,
+    TWDIG
+  ) %>%
+  mutate(
+    FOODCODC = as.character(FOODCODC),
+    FIVDIG = as.character(FIVDIG),
+    THRDIG = as.character(THRDIG),
+    TWDIG = as.character(TWDIG)
+  )
+
+dict_food_class = quiet_read(here("data","nutmstatDataItems2019.xlsx"),sheet=4)$result
+
+
+# Shift the column names to the values in the  row
+colnames(dict_food_class) <- as.character(dict_food_class[2, ])
+
+# Remove the first row after assigning column names
+dict_food_class <- dict_food_class[-c(1,2), ]
+dict_food_class <- dict_food_class %>% janitor::clean_names()
+
+# Replace values for FOODCODC
+df <- df %>%
+  left_join(dict_food_class, by = c("FOODCODC" = "category_code")) %>%
+  mutate(FOODCODC = category_label) %>%
+  select(-category_label)  # remove the joined 'category_label' column 
+
+# Replace values for FIVDIG
+df <- df %>%
+  left_join(dict_food_class, by = c("FIVDIG" = "category_code")) %>%
+  mutate(FIVDIG = category_label) %>%
+  select(-category_label)
+
+# Replace values for THRDIG
+df <- df %>%
+  left_join(dict_food_class, by = c("THRDIG" = "category_code")) %>%
+  mutate(THRDIG = category_label) %>%
+  select(-category_label)
+
+# Replace for TWDIG
+df <- df %>%
+  left_join(dict_food_class, by = c("TWDIG" = "category_code")) %>%
+  mutate(TWDIG = category_label) %>%
+  select(-category_label)
+
+# Replace original columns in tech_food with the ones from df
+tech_food <- tech_food %>%
+  mutate(
+    FOODCODC = df$FOODCODC,
+    FIVDIG = df$FIVDIG,
+    THRDIG = df$THRDIG,
+    TWDIG = df$TWDIG
+  )
+
+```
+
+
+### PATCH 3 - FIXING FOOD DATA
+Found that expected _MISS variables are not present in tech_food (corrected by tolower()) (*)
+- Other expected _MISS vars (derived from types_food e.g., psaltadd, density, etc.) are not present:
+```{r Patch3}
+# checking if all vars in type_food are present in raw data (found that PSALTADD is not present)
+vars_in_types_food = subset(types_food, !is.na(description))$variable_name
+vars_in_raw = colnames(raw_food)
+#setdiff(vars_in_types_food, vars_in_raw)
+#setdiff(vars_in_raw, vars_in_types_food)
+# Can see that the expected vars are not actually present in the raw data +
+ #there are 4 redundant cols at the end of raw_food - need to remove these.
+tech_food = tech_food %>% select(-setdiff(vars_in_raw, vars_in_types_food))
+```
+
+
+### PATCH 4 - MERGING BIOM, NUTR and FOOD
+
+Biom and nutrient can be joined by ABSPID as there are no duplicate entries for PID
+
+```{r Patch4.1}
+#length(unique(tech_biom$ABSPID))
+#length(unique(tech_nutr$ABSPID))
+
+biom_nutr_raw = tech_biom %>%
+  full_join(tech_nutr, by = "ABSPID") 
+```
+
+FOOD contains multiple entries per person (ABSPID) so its not a trivial join.
+Im thinking I create a list object for each ABSPID that contains all the information for that ABSPID.
+I.e., Create a column in biom_nutr_raw called FOOD_data ( and for each ABSPID it will contain all info for that ABSPID in tech_food
+
+all info 
+```{r Patch4.2}
+# Split the tech_food dataframe into a list based on ABSPID
+list_data <- with(tech_food, split(tech_food, ABSPID))
+
+# Create a new dataframe with unique ABSPID and corresponding list_data
+list_df <- data.frame(ABSPID = names(list_data), FOOD_DATA = I(list_data))
+
+# Merge with biom_nutr_raw
+biom_nutr_food <- merge(biom_nutr_raw, list_df, by = "ABSPID", all.x = TRUE)
+
+# If some ABSPIDs from biom_nutr_raw don't have corresponding data in tech_nutr, 
+# the FOOD_DATA column for those ABSPIDs will have NAs. If you want to replace NAs with empty lists, you can do:
+biom_nutr_food$FOOD_DATA[sapply(biom_nutr_food$FOOD_DATA, is.null)] <- I(list(data.frame()))
+
+# Could further split into daynum for example (there are 2 levels)
+```
+
+
+### PATCH 5 - LINK ABORIGINAL AND ISLANDER COHORT
+
+Note that 230ish variables are common between the two datasets. Some variables that are not in the above data dictionary (aboriginal/dictionary.csv) can be found in the numstat dict file (biom, food, nutr, food_class)
+```{r Patch5}
+raw_abor = read.csv(here("data/aboriginal","aboriginal_cohort.csv"), header=TRUE)
+dict_abor <- read.csv(here("data/aboriginal","dictionary.csv"),header=TRUE)
+```
+
+
+
+### PATCH 6 - FIX AGE COL NAME (realised that even though only household id is used to identify, they are still individuals (not households; same household id is repeated for different individuals) - might have to check other variables)
+
+```{r Patch6.1}
+raw_abor$AGEC = raw_abor$AGEEC
+
+# Function to find descriptions
+find_descriptions <- function(col_names, dictionaries) {
+  descriptions <- character(0)
+  
+  for (col_name in col_names) {
+    for (dict in dictionaries) {
+      match_row <- match(col_name, dict$variable_name)
+      if (!is.na(match_row)) {
+        descriptions <- c(descriptions, dict$description[match_row])
+        break  # Break out of the inner loop once a match is found
+      }
+    }
+  }
+  
+  return(descriptions)
+}
+
+# Find colnames in common between biom_nutr_food and aboriginal/islander and extract descriptions
+
+abor_cols = colnames(raw_abor)
+df_cols = colnames(biom_nutr_food)
+food_cols = colnames(tech_food)
+common_df_abor_cols = intersect(df_cols, abor_cols)
+common_food_abor_cols = intersect(food_cols, abor_cols)
+#only ABSHID (i.e., food data (in biom_nutr_food) not relev for aboriginal cohort)
+descriptions1 <- find_descriptions(common_df_abor_cols, list(types_biom, types_nutr))
+descriptions2 <- find_descriptions(common_food_abor_cols, list(types_food))
+
+```
+
+
+INDGSTAT not in raw data! need another way to classify as indigenous.
+
+Turns out culture vars arent in raw data. Looking at the dictionary.csv file more carefully, i noticed 'Type of Aboriginal and ...Islander household' which led me to the 'household level' sheet in the dic
+
+can use household level data to determine number of aboriginal/islander in each home (only ABSHID is provided in raw data so makes sense)
+- rmk: theres a lot of data there e.g., household_type etc that may help with accuracy later on
+
+```{r Patch6.2, message=FALSE}
+# set up household dictionary for indigenous cohort (might be needed later)
+dict_abor <- read_excel(here("data/aboriginal", "australian aboriginal and torres strait islander health survey data item list.xls"), sheet = 4, skip = 4) # skip to where relevant in sheet
+dict_abor = dict_abor %>% select (
+  variable_name = `SAS name`,
+  `Items & categories`,
+  `Main population`
+) 
+dict_abor <- dict_abor %>% janitor::remove_empty("rows")
+abor_readable <- dict_abor %>% 
+  filter(!is.na(variable_name)) 
+dict_abor <- dict_abor %>% tidyr::fill(variable_name)
+var_names_abor <- unique(dict_abor$variable_name)
+tib4 <- tibble(variable_type=get_type(dict_abor))
+types_abor <- bind_cols(abor_readable, tib4)
+
+# Subset id and number of aboriginal/islander in house
+
+df_abor = raw_abor %>% select(
+  ABSHID,
+  NOATSIHH
+)
+
+# step 1: clean cols that are in biom data
+biom_cols = colnames(tech_biom)
+common_biom_abor_cols = intersect(biom_cols, abor_cols)
+common_biom_abor_cols = c("ABSHID", common_biom_abor_cols)
+biom_abor_df = raw_abor[, common_biom_abor_cols]
+tech_biom_abor = raw_to_tech(biom_abor_df, special_biom_new, types_biom)
+# step 2: clean cols that are in nutr data
+nutr_cols = colnames(tech_nutr)
+common_nutr_abor_cols = intersect(nutr_cols, abor_cols)
+common_nutr_abor_cols = c(common_nutr_abor_cols, "ABSHID")
+nutr_abor_df = raw_abor[, common_nutr_abor_cols]
+tech_nutr_abor = raw_to_tech(nutr_abor_df, special_nutr, types_nutr)
+# step 3: full merge (can filter later if needed)
+tech_abor = merge(tech_biom_abor, tech_nutr_abor, by = "ABSHID", all = TRUE)
+
+# Now need to join household_number var
+tech_abor = merge(tech_abor, df_abor, by = "ABSHID", all = TRUE)
+```
+
+
+
+
+### PATCH 7: ADD PROXY ABSPID TO ABORIGINAL DATA 
+```{r Patch7}
+tech_abor = tech_abor %>% mutate(ABSPID = row_number())
+```
+
+
+
+
+## Saving/Clearing Environment
+```{r Cleanup1, include=FALSE}
+aborig_household_dict = dict_abor
+ save(tech_biom, dict_biom, types_biom,
+      tech_nutr, dict_nutr, types_nutr,
+      tech_food, dict_food, types_food,
+      dict_food_class, biom_nutr_food,
+      tech_abor,aborig_household_dict,
+      file = "p7.Rdata")
+ # List all objects in the environment
+all_objects <- ls()
+
+# Remove all objects except for the "p7.Rdata" file
+rm(list=setdiff(all_objects, "p7.Rdata"))
+
+# Clear all objects (including hidden objects)
+load("p7.Rdata")
+```
+
+
+
+# CVD Risk prevalence in Cohorts
+
+## Setup
+```{r SetupCVD, warning=FALSE}
+# Merge biom data for both groups
+biom_ind = types_biom$variable_name[types_biom$variable_name %in% colnames(tech_abor)]
+biom_nonind = types_biom$variable_name[types_biom$variable_name %in% colnames(biom_nutr_food)]
+
+names = intersect(biom_ind, biom_nonind)
+# subset
+ind_biom = tech_abor %>% select(all_of(names)) %>% mutate(group = 'Indigenous')
+nonind_biom = biom_nutr_food %>% select(all_of(names)) %>% mutate(group = 'Non-Indigenous')
+
+for (col_name in names(ind_biom)) {
+  # Skip the 'group' column as it doesn't need to be changed
+  if (col_name != "group") {
+    target_class <- class(nonind_biom[[col_name]])
+   
+    # Check if the classes are different
+    if (class(ind_biom[[col_name]]) != target_class) {
+      # Coerce to the target class
+      if (target_class == "factor") {
+        ind_biom[[col_name]] <- as.factor(ind_biom[[col_name]])
+      } else if (target_class == "numeric") {
+        ind_biom[[col_name]] <- as.numeric(as.character(ind_biom[[col_name]]))  # Convert to character first to avoid potential issues
+      } else if (target_class == "integer") {
+        ind_biom[[col_name]] <- as.integer(as.character(ind_biom[[col_name]]))  # Convert to character first
+      } else if (target_class == "character") {
+        ind_biom[[col_name]] <- as.character(ind_biom[[col_name]])
+      }  # Add more cases if there are more data types you need to handle
+    }
+  }
+}
+
+# Convert variables in nonind_biom to match those in ind_biom
+for (var in names(ind_biom)) {
+  if (is.integer(ind_biom[[var]])) {
+    nonind_biom[[var]] <- as.integer(as.character(nonind_biom[[var]]))
+  }
+  else if (is.numeric(ind_biom[[var]])) {
+    nonind_biom[[var]] <- as.numeric(as.character(nonind_biom[[var]]))
+  }
+}
+
+
+#Transcribe factor levels from dictionary to df:
+
+# Combine the dataframes
+df = rbind(ind_biom, nonind_biom)
+df$group = as.factor(df$group)
+df = df %>% filter(AGEC >=18)
+
+for (var in names(df)) {
+  # Check the type of the variable from types_biom
+  var_type <- subset(types_biom, variable_name == var)$variable_type
+ 
+  if (length(var_type) == 0) {
+    next  # skip if the variable is not found in types_biom
+  }
+ 
+  if (var_type == "categorical") {
+    # Fetch the descriptions for the variable from dict_biom
+    descriptions <- subset(dict_biom, variable_name == var)$description
+   
+    # Extract codes from the descriptions
+    codes <- as.numeric(sub("([0-9]+)\\..*", "\\1", descriptions))
+   
+    # Exclude the rows with NA (which would be the ones that don't have codes)
+    valid_rows <- !is.na(codes)
+    descriptions <- descriptions[valid_rows]
+    codes <- codes[valid_rows]
+   
+    # The first valid entry after filtering might be a definition, so we should check and remove it
+    if(!grepl("^[0-9]+\\.", descriptions[1])){
+      descriptions <- descriptions[-1]
+      codes <- codes[-1]
+    }
+   
+    # Create a named vector to map the levels
+    level_mapping <- setNames(descriptions, codes)
+   
+    # Convert the variable to a factor and set the levels
+    df[[var]] <- factor(df[[var]], levels = as.character(codes), labels = descriptions)
+  }
+}
+str(df)
+```
+
+## Definitions
+Create target variables and corresponding criteria that will be used to define CVD risk (labels and corresponding ranges/criteria provided by Nutrition students)
+```{r Defintions}
+# Filter and create flags
+df <- df %>%
+  mutate(
+    # Obesity conditions
+    Obesity = case_when(
+      is.na(BMISC) | is.na(SEX) | is.na(PHDCMWBC) ~ NA_character_,
+      BMISC > 30 ~ "Obese",
+      (SEX == "1. Male" & PHDCMWBC > 102) | (SEX == "2. Female" & PHDCMWBC > 88) ~ "Obese",
+      TRUE ~ "Not Obese"
+    ),
+   
+    # Hypertension conditions
+    Hypertension = case_when(
+      is.na(SYSTOL) | is.na(DIASTOL) ~ NA_character_,
+      SYSTOL > 140 | DIASTOL > 90 ~ "Hypertensive",
+      SYSTOL <= 140 & DIASTOL <= 90 ~ "Non-Hypertensive",
+    ),
+   
+    # Diabetes condition
+    Diabetes = case_when(
+      is.na(DIAHBRSK) ~ NA_character_,
+      DIAHBRSK %in% c("2. At risk of diabetes - HbA1c 6.0 - 6.4 %", "3. Indicates diabetes - HbA1c greater than or equal to 6.5%") ~ "Diabetic or at risk",
+      DIAHBRSK == "1. Normal - HbA1c <6.0%" ~ "Non Diabetic",
+    ),
+   
+    # ApoB condition
+    ApoB = case_when(
+      is.na(APOBNTR) ~ NA_character_,
+      APOBNTR == "1. Normal ApoB" ~ "Normal ApoB",
+      APOBNTR == "2. Abnormal ApoB" ~ "Abnormal ApoB",
+    ),
+   
+    # Dyslipidemia conditions
+    Dyslipidemia = case_when(
+      # Conditions for Dyslipidemia
+      (SEX == "1. Male" & HDLCHREB == "1. Less than 1.0") | (SEX == "2. Female" & HDLCHREB %in% c("1. Less than 1.0", "2. 1.0 to less than 1.3")) ~ "Dyslipidemia",
+      !is.na(LDLRESB) & LDLRESB %in% c("06. 3.5 to less than 4.0", "07. 4.0 to less than 4.5", "08. 4.5 or more") ~ "Dyslipidemia",
+      !is.na(TRIGRESB) & TRIGRESB %in% c("05. 2.0 to less than 2.5", "2.5 to less than 3.0", "07. 3.0 or more") ~ "Dyslipidemia",
+     
+      # If no conditions are met and there are no missing variables
+      (is.na(SEX) | is.na(HDLCHREB) | is.na(LDLRESB) | is.na(TRIGRESB)) &
+      !((SEX == "1. Male" & HDLCHREB == "1. Less than 1.0") | (SEX == "2. Female" & HDLCHREB %in% c("1. Less than 1.0", "2. 1.0 to less than 1.3"))) &
+      !(LDLRESB %in% c("06. 3.5 to less than 4.0", "07. 4.0 to less than 4.5", "08. 4.5 or more")) &
+      !(TRIGRESB %in% c("05. 2.0 to less than 2.5", "2.5 to less than 3.0", "07. 3.0 or more")) ~ NA_character_,
+   
+      # Default
+      TRUE ~ "No Dyslipidemia"
+    ))
+
+cvd_df = df %>% select(ABSPID, SEX, SMKDAILY,
+Obesity,
+Hypertension,
+Diabetes,
+ApoB,
+Dyslipidemia,
+group)
+cvd_vars <- c('Obesity', 'Hypertension', 'Diabetes', 'ApoB', 'Dyslipidemia')
+head(cvd_df)
+```
+
+## Missingness
+```{r Plot1, echo=FALSE}
+plot_df = cvd_df %>% select(all_of(cvd_vars), group)
+gg_miss_fct(plot_df, fct = group)
+```
+
+```{r Plot2, echo=FALSE}
+levels_of_group <- unique(plot_df$group)
+
+# Loop through each level of the group variable and plot the missingness
+for (level in levels_of_group) {
+  subset_data <- plot_df[plot_df$group == level, ]
+  print(paste("Missingness for group:", level))
+  print(gg_miss_upset(subset_data))
+}
+
+```
+
+### Dealing with NA values 
+Filter NA combinations (ApoB and Diabetes + ApoB and Diabetes and Dyslipidemia)
+```{r Filter NA combinations, warning=FALSE}
+filtered_cvd_df <- cvd_df %>%
+  filter(
+    !(is.na(ApoB) & is.na(Diabetes)), # Not both ApoB and Diabetes are NA
+    !(is.na(ApoB) & is.na(Diabetes) & is.na(Dyslipidemia)) # Not all three variables are NA
+  )
+
+```
+
+```{r Plot3, echo=FALSE, warning=FALSE}
+plot_df = filtered_cvd_df %>% select(cvd_vars, group)
+levels_of_group <- unique(plot_df$group)
+
+# Loop through each level of the group variable and plot the missingness
+for (level in levels_of_group) {
+  subset_data <- plot_df[plot_df$group == level, ]
+  print(paste("Missingness for group:", level))
+  print(gg_miss_upset(subset_data))
+}
+
+table(filtered_cvd_df$group)
+```
+
+### Group imbalance (downsampling)
+
+```{r Downsample}
+
+# Split data into Indigenous and Non-Indigenous
+indigenous_df <- filter(filtered_cvd_df, group == "Indigenous")
+nonindigenous_df <- filter(filtered_cvd_df, group == "Non-Indigenous")
+
+# Randomly select 2500 samples from each group (couldve been 2800 to be more accurate)
+sampled_indigenous <- sample_n(indigenous_df, 2500)
+sampled_nonindigenous <- sample_n(nonindigenous_df, 2500)
+
+# Combine the sampled datasets
+sampled_df <- bind_rows(sampled_indigenous, sampled_nonindigenous)
+# Convert all columns except ABSPID to factors
+sampled_df[, -which(names(sampled_df) == "ABSPID")] <- lapply(sampled_df[, -which(names(sampled_df) == "ABSPID")], factor)
+
+table(sampled_df$group)
+```
+
+
+## Variables that have a signficantly different distribution in cohorts
+Relevant variables for this analysis are factors with frequency counts. I assumed that our data is suitable for a Chi-squared test to determine if there is significant difference in high CVD risk prevalence between the two cohorts (Indigenous and Non-Indigenous Australians). Here is a barplot showing the proportion of high cvd risk prevalence by cohort:
+
+```{r Plot4, echo=FALSE}
+criteria_proportions <- sampled_df %>%
+  group_by(group) %>%
+  summarise(
+    Total = n(),
+    # Current_or_Past_Smoker = sum(SMKDAILY %in% c("1. Current daily smoker", "2. Past daily smoker (still smokes)"), na.rm = TRUE) / Total,
+    Obese = sum(Obesity == "Obese", na.rm = TRUE) / Total,
+    Hypertensive = sum(Hypertension == "Hypertensive", na.rm = TRUE) / Total,
+    Diabetic = sum(Diabetes == "Diabetic or at risk", na.rm = TRUE) / Total,
+    Abnormal_ApoB = sum(ApoB == "Abnormal ApoB", na.rm = TRUE) / Total,
+    Dyslipidemia = sum(Dyslipidemia == "Dyslipidemia", na.rm = TRUE) / Total
+  ) %>%
+  select(-Total) %>% rename_all(~gsub("_", " ", .)) #removes '_"
+
+
+
+ 
+# Convert the data to a long format
+long_data <- criteria_proportions %>%
+  gather(key = "Criteria", value = "Proportion", -group) %>%
+  filter(Proportion != 1)  # Exclude proportions that equal 1
+
+# Plot the data
+ggplot(long_data, aes(x = Criteria, y = Proportion, fill = group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +  # Flip axes for better visibility with long criterion names
+  labs(y = "Proportion",
+       x = "Risk factor") +
+  theme_minimal() +
+  scale_fill_manual(values = c("lightblue", "pink"), name = "Cohort")
+```
+
+
+## Statistical testing (Chi-Square) 
+```{r ChiSquare, warning=FALSE}
+# Initialize an empty vector to store the significant variables
+sig_vars <- c()
+p_value_df <- data.frame(variable = character(), p_value = numeric())
+
+for (var in cvd_vars) {
+  # Subset the data
+  x <- sampled_df %>% select(var, group)
+  x[[var]] = as.factor(x[[var]])
+  # If the variable is a factor, drop the specified levels and perform statistical testing
+    # Perform Chi-squared test
+    chisq_result <- chisq.test(table(x[[var]], x$group)) 
+    p_value_df <- rbind(p_value_df, data.frame(variable = var, p_value = chisq_result$p.value))
+   
+    # If the p-value is less than 0.05, add the variable name to the sig_vars vector
+    # not sure if i should have done a Bonferroni correction? 
+    if (chisq_result$p.value < 0.05) {
+      sig_vars <- c(sig_vars, var)
+    }
+}
+
+sorted_biom_p_df <- p_value_df %>% arrange(p_value)
+
+# subset the original dataframe
+sig_biom_final <- sampled_df %>% select(ABSPID, group, SEX, SMKDAILY, all_of(sig_vars))
+biom_var_info = long_data
+head(sorted_biom_p_df)
+```
+
+
+## Saving/Clearing Environment
+```{r Cleanup2, include=FALSE}
+ save(sig_biom_final, biom_var_info,
+      file = "biomanalysis.Rdata")
+ # List all objects in the environment
+all_objects <- ls()
+# Remove all objects except for the "p7.Rdata" file
+rm(list=setdiff(all_objects, c("p7.Rdata", "biomanalysis.Rdata")))
+load("p7.Rdata")
+load("biomanalysis.Rdata")
+```
+
+# Dietary Patterns in Cohorts
+
+## Setup
+
+### Common data
+```{r SetupDiet}
+# get nutrition col names present in aboriginal df
+nutr_ind = types_nutr$variable_name[types_nutr$variable_name %in% colnames(tech_abor)]
+nutr_nonind = types_nutr$variable_name[types_nutr$variable_name %in% colnames(tech_nutr)]
+names = intersect(nutr_ind, nutr_nonind)
+# subset
+ind_nutr = tech_abor %>% select(all_of(names)) %>% mutate(group = 'Indigenous')
+nonind_nutr = tech_nutr %>% select(all_of(names)) %>% mutate(group = 'NonIndigenous')
+# combine
+df = rbind(ind_nutr, nonind_nutr)
+df$group = as.factor(df$group)
+dim(df)
+```
+
+### Combining Day1 and Day2 measurements into an average
+```{r Aggregate}
+# Initialize a list to store columns to be removed
+cols_to_remove <- c()
+
+# Loop through each column
+for (col_name in colnames(df)) {
+  # If the column name has a "1" or ends with "1N"
+  if (grepl("1$", col_name) || grepl("1N$", col_name)) {
+    # Determine the counterpart column name with "2"
+    counterpart_col_name <- gsub("1$", "2", col_name)
+    counterpart_col_name <- gsub("1N$", "2N", counterpart_col_name)
+   
+    # Check if both columns exist and if we haven't already processed them
+    if (col_name %in% colnames(df) && counterpart_col_name %in% colnames(df) && !(col_name %in% cols_to_remove)) {
+      # Calculate mean of both columns and assign to new column with suffix "_mean"
+      mean_col_name <- paste0(gsub("[12]", "", col_name), "_mean")
+     
+      # Handle specific variables differently
+      if (col_name %in% c("B12T1", "B12T2")) {
+        mean_col_name <- ("B12_mean")
+      } else if (col_name %in% c("B1T1", "B1T2")) {
+        mean_col_name <- paste0("B1T_mean")
+      } else if (col_name %in% c("B2T1", "B2T2")) {
+        mean_col_name <- paste0("B2T_mean")
+      } else if (col_name %in% c("B3T1", "B3T2")) {
+        mean_col_name <- paste0("B3T_mean")
+      } else if (col_name %in% c("B6T1", "B6T2")) {
+        mean_col_name <- paste0("B6T_mean")
+      }
+     
+      df[[mean_col_name]] <- rowMeans(df[, c(col_name, counterpart_col_name)], na.rm = TRUE)
+     
+      # Store columns to be removed
+      cols_to_remove <- c(cols_to_remove, col_name, counterpart_col_name)
+    }
+  }
+}
+
+# Remove the original columns that had counterparts
+df <- df[, !colnames(df) %in% cols_to_remove]
+# PATCH 7
+df = df %>% select(-ABSHID)
+
+
+levels(df$group) <- c('Indigenous', 'NonIndigenous')
+
+```
+
+## Checking equal variance and normality assumptions in data
+
+### QQPlots of variables that satisfy equal variance assumption (Levene's test, p > 0.05)
+```{r Assumptions}
+plot_distribution <- function(df, var_name) {
+  ggplot(df, aes_string(x = var_name, fill = "group")) + 
+    geom_histogram(aes(y = ..density..), position = "identity", alpha = 0.5, bins = 30) + 
+    geom_density(color = "black", lwd = 1) +
+    labs(title = paste("Distribution of", var_name, "by group"), x = var_name, y = "Density") +
+    theme_minimal() +
+    scale_fill_manual(values = c("Indigenous" = "lightblue", "NonIndigenous" = "lightpink"))
+}
+variance_vars = c()
+for (col in colnames(df)) {
+  # Remove NA values for the current column
+  df_temp <- df[!is.na(df[[col]]), ]
+  
+  # Test for homogeneity of variances
+  if (is.numeric(df_temp[[col]])) {
+    leveneTestRes <- leveneTest(df_temp[[col]], df_temp$group)
+    # Check if the result is NA, and if not, then perform the comparison
+    if (!is.na(leveneTestRes[1, "Pr(>F)"]) && leveneTestRes[1, "Pr(>F)"] > 0.05) {
+      variance_vars = c(variance_vars, col)
+
+      qq_plot <- ggplot(df_temp, aes(sample = .data[[col]])) + 
+        stat_qq() + 
+        stat_qq_line() + 
+        ggtitle(paste("QQ plot of", col))
+
+      distribution_plot <- plot_distribution(df_temp, col)
+
+      combined_plot <- grid.arrange(qq_plot, distribution_plot, ncol = 2)
+
+    }
+  }
+}
+
+```
+
+
+### Transformation 
+```{r Transformation, echo=FALSE, message=FALSE}
+# Checking skewness (>> 0 indicates transformation may be good?)
+# sapply(df[, variance_vars], skewness)
+
+# Only PEADDSD and REFGRA1N are worth investigating at this point:
+df_transformed = df
+transformed_vars <- lapply(df_transformed[, variance_vars], bestNormalize)
+
+df_transformed <- df %>% 
+  mutate_at(vars(variance_vars), function(x) {
+    transformed_vars[[deparse(substitute(x))]]$x.t
+  })
+
+names(df_transformed)[(ncol(df_transformed) - length(variance_vars) + 1):ncol(df_transformed)] <- paste0(variance_vars, "_transformed")
+
+# QQ plot and the histogram side by side
+for (var_name in paste0(variance_vars, "_transformed")) {
+  print(var)
+
+  df_transformed_temp <- df_transformed[complete.cases(df_transformed[var_name]), ]
+
+  qq_plot <- ggplot(df_transformed_temp, aes(sample = .data[[var_name]])) + 
+    stat_qq() + 
+    stat_qq_line() + 
+    ggtitle(paste("QQ plot of", var_name))
+
+  distribution_plot <- ggplot(df_transformed_temp, aes_string(x = var_name, fill = "group")) + 
+    geom_histogram(aes(y = ..density..), position = "identity", alpha = 0.5, bins = 30) + 
+    geom_density(color = "black", lwd = 1) +
+    labs(title = paste("Distribution of", var_name, "by group"), x = var_name, y = "Density") +
+    theme_minimal() +
+    scale_fill_manual(values = c("Indigenous" = "lightblue", "NonIndigenous" = "lightpink"))
+
+  combined_plot <- grid.arrange(qq_plot, distribution_plot, ncol = 2)
+
+}
+
+```
+
+
+
+
+Only PEADDSD_mean satisfies both normality and variance assumptions. Further research indicated that the Kolmogorov-Smirnov test is appropriate:
+<br>
+https://towardsdatascience.com/kolmogorov-smirnov-test-84c92fb4158d,
+<br>
+https://en.wikipedia.org/wiki/Kolmogorov%E2%80%93Smirnov_test
+
+## KS test to find variables that have signficantly different distributions
+```{r KS test}
+# Initialize a list to store p-values
+ks_test_results <- list()
+test_cols <- setdiff(colnames(df), c("ABSPID", "group"))
+for (col in test_cols) {
+  # Extract non-NA values for the current column
+  df_temp <- df[!is.na(df[[col]]), ]
+ 
+  group_ind_values <- df_temp[[col]][df_temp$group == "Indigenous"]
+  group_nonind_values <- df_temp[[col]][df_temp$group == "NonIndigenous"]
+ 
+  # Perform the Kolmogorov-Smirnov test
+  test_result <- ks.test(group_ind_values, group_nonind_values)
+ 
+  # Store p-value
+  ks_test_results[[col]] <- test_result$p.value
+}
+
+# Order variables by p-values
+ordered_vars_ks <- names(ks_test_results)[order(unlist(ks_test_results))]
+
+# Print variables with p-values less than 0.01 
+significant_vars_ks <- ordered_vars_ks[unlist(ks_test_results)[order(unlist(ks_test_results))] < 0.01]
+sig_nutr_final = df %>% select(ABSPID, group, significant_vars_ks)
+
+# Initialize an empty dataframe
+summary_df <- data.frame(Variable = character(0), Indigenous = numeric(0), NonIndigenous = numeric(0), P_Value = numeric(0))
+
+# Loop through the variables from KS test results
+for (col in ordered_vars_ks) {
+  # Extract non-NA values for the current column
+  df_temp <- df[!is.na(df[[col]]), ]
+ 
+  # Calculate medians for the two groups
+  Indigenous <- median(df_temp[[col]][df_temp$group == "Indigenous"], na.rm = TRUE)
+  NonIndigenous <- median(df_temp[[col]][df_temp$group == "NonIndigenous"], na.rm = TRUE)
+ 
+  # Extract p-value
+  p_val <- ks_test_results[[col]]
+ 
+  # Append to the summary dataframe
+  summary_df <- rbind(summary_df, data.frame(Variable = col, Indigenous = Indigenous, NonIndigenous = NonIndigenous, P_Value = p_val))
+}
+
+# View the summary dataframe
+summary_df = summary_df %>% filter(P_Value < 0.01)
+
+
+
+
+# Use labels from dictionary to understand values
+
+cols_to_remove <- c()
+mean_col_names = c()
+mean_col_descs = c()
+df1 = list()
+i = 1
+# Loop through each column
+for (col_name in types_nutr$variable_name) {
+  # If the column name has a "1"
+  if (grepl("1$", col_name) || grepl("1N$", col_name)) {
+    # Determine the counterpart column name with "2"
+    counterpart_col_name <- gsub("1$", "2", col_name)
+    counterpart_col_name <- gsub("1N$", "2N", counterpart_col_name)
+   
+    # Check if both columns exist and if we haven't already processed them
+    if (col_name %in% types_nutr$variable_name && counterpart_col_name %in% types_nutr$variable_name && !(col_name %in% cols_to_remove)) {
+            # Handle specific variables differently
+      if (col_name %in% c("B12T1", "B12T2")) {
+          mean_col_name <- ("B12_mean")
+          mean_col_desc = types_nutr$description[i]
+        } else if (col_name %in% c("B1T1", "B1T2")) {
+          mean_col_name <- paste0("B1T_mean")
+          mean_col_desc = types_nutr$description[i]
+        } else if (col_name %in% c("B2T1", "B2T2")) {
+          mean_col_name <- paste0("B2T_mean")
+          mean_col_desc = types_nutr$description[i]
+        } else if (col_name %in% c("B3T1", "B3T2")) {
+          mean_col_name <- paste0("B3T_mean")
+          mean_col_desc = types_nutr$description[i]
+        } else if (col_name %in% c("B6T1", "B6T2")) {
+          mean_col_name <- paste0("B6T_mean")
+          mean_col_desc = types_nutr$description[i]
+        }
+      else {
+        mean_col_name <- paste0(gsub("[12]", "", col_name), "_mean")
+        mean_col_desc = types_nutr$description[i]
+      }
+      df1 = rbind(df1, c(mean_col_name, mean_col_desc))
+      # Store columns to be removed
+      cols_to_remove <- c(cols_to_remove, col_name, counterpart_col_name)
+    }
+  }
+  if(!(col_name %in% cols_to_remove)){
+    unique_col_desc = types_nutr$description[i]
+    df1 = rbind(df1, c(col_name, unique_col_desc))
+  }
+  i = i + 1
+ 
+}
+df1 = as.data.frame(df1)
+df1$V1 = as.character(df1$V1)
+df1$V2 = as.character(df1$V2)
+df1$V2 = gsub("(?i)day\\s*1|\\s+", " ", df1$V2)
+
+final = summary_df %>%
+  left_join(df1, by = c("Variable" = "V1"))
+final = summary_df %>%
+  left_join(df1, by = c("Variable" = "V1"))
+final = final %>% mutate(diff = abs(Indigenous - NonIndigenous)) %>% filter(Indigenous != 0, NonIndigenous != 0)
+
+
+```
+
+
+
+## Visualisation
+
+### All variables grouped by category, shown by median (robust measure when considering distributions)
+```{r PrelimVisuals}
+# Energy
+energy_vars <- c("BMR", "EIBMR_mean", "ENERGYT_mean", "ENRGYT_mean", "MOISTT_mean")
+
+# Macronutrients
+macronutrient_vars <- c("PROTT_mean", "FATT_mean", "CHOWSAT_mean", "CHOWOAT_mean", "STARCHT_mean",
+                        "SUGART_mean", "FIBRET_mean")
+
+# Vitamins
+vitamin_vars <- c("PREVAT_mean", "PROVAT_mean", "RETEQT_mean", "B1T_mean", "B2T_mean",
+                  "B3T_mean", "NIACINT_mean", "FOLATT_mean", "FOLICT_mean", "TOTFOLT_mean",
+                  "FOLEQT_mean", "B6T_mean", "B12_mean", "VITCT_mean", "VITET_mean")
+
+# Minerals
+mineral_vars <- c("CALCT_mean", "IODINET_mean", "IRONT_mean", "MAGT_mean", "PHOST_mean",
+                  "POTAST_mean", "SELT_mean", "SODIUMT_mean", "ZINCT_mean")
+
+# Fats
+fat_vars <- c("CAFFT_mean", "CHOLT_mean", "SATFATT_mean", "MUFATT_mean", "PUFATT_mean",
+              "LAT_mean", "ALAT_mean", "LCN3T_mean", "TRANST_mean")
+
+# Percentage of Energy from Macronutrients
+energy_percentage_vars <- c("PROPER_mean", "FATPER_mean", "LAPER_mean", "ALAPER_mean",
+                            "CHOPER_mean", "SUGPER_mean", "STARPER_mean", "SATPER_mean",
+                            "TRANPER_mean", "FIBRPER_mean", "MONOPER_mean", "POLYPER_mean", "PEFRESD_mean", "PEADDSD_mean")
+
+energy_percentage_vars1 <-
+  c( "FATPER_mean",  "CHOPER_mean", "SUGPER_mean",  "FIBRPER_mean", "PEADDSD_mean")
+
+
+# Food Groups
+food_groups_vars <- c("GRAINSN_mean", "VEGLEGN_mean", "FRUITN_mean", "DAIRYN_mean", "MEATN_mean", "MEATLN_mean",
+                      "WATERN_mean", "UNSATN_mean")
+
+food_groups_vars1 <- c("GRAINSN_mean", "VEGLEGN_mean", "FRUITN_mean",  "MEATN_mean","WATERN_mean", "UNSATN_mean")
+# Others
+other_vars <- c("FRESUGN_mean", "ADDSUGN_mean", "WATERGN_mean")
+
+# Grouping all variables
+group_names <- c('energy_vars', 'macronutrient_vars', 'vitamin_vars', 'mineral_vars', 'fat_vars',
+                   'energy_percentage_vars', 'food_groups_vars', 'other_vars')
+
+
+
+plot_nutrient_group <- function(data, nutrient_group, name) {
+ 
+  # Reshape the dataframe to long format for plotting
+  data_long <- data %>%
+    gather(key = "Group", value = "Median", Indigenous, NonIndigenous)
+
+  # Filter data based on the nutrient group provided
+  df_group <- data_long[data_long$Variable %in% nutrient_group, ]
+ 
+  # Remove the '()' from the V2 variable
+  df_group$V2 <- gsub("\\s*\\(.*\\)\\s*$", "", df_group$V2)
+
+  # Plot
+  p <- ggplot(df_group, aes(x = V2, y = Median, fill = Group)) +
+    geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+    coord_flip() +
+    labs(title = paste0("Analysis by Nutritional Group: ", name), y = "Median Value", x = "") +
+    theme_minimal() +
+    scale_fill_manual(values = c("Indigenous" = "lightblue", "NonIndigenous" = "pink"))
+ 
+
+  return(p)
+}
+
+plot_nutrient_group(final, energy_vars, "Energy")
+plot_nutrient_group(final, macronutrient_vars, "Macronutrients")
+plot_nutrient_group(final, vitamin_vars, "Vitamins")
+plot_nutrient_group(final, mineral_vars, "Minerals")
+plot_nutrient_group(final, fat_vars, "Fats")
+plot_nutrient_group(final, energy_percentage_vars, "Energy percentages")
+plot_nutrient_group(final, food_groups_vars, "Food groups")
+plot_nutrient_group(final, other_vars, "Other")
+
+```
+
+### Boxplots showing distributions of relevant variables in analysis
+```{r Boxplots}
+foods = c("GRAINSN_mean", "VEGLEGN_mean", "FRUITN_mean", "DAIRYN_mean", "MEATN_mean", "UNSATN_mean")
+
+energypers =  c("FATPER_mean",  "PROPER_mean", "CHOPER_mean", "SUGPER_mean",  "FIBRPER_mean", "PEADDSD_mean", "SATPER_mean")
+
+df$group = gsub("NonIndigenous", "Non-Indigenous", df$group)
+
+id_desc <- final %>%
+  mutate(name = gsub("\\s*\\(.*\\)\\s*$", "", V2) %>%  # remove "()"
+           gsub(".*\\bfrom\\s+", "", .) %>%  # remove '...from'
+           str_to_title(.)) %>%  # capitalize
+  select(Variable, name)
+
+food_labels = id_desc %>% filter(Variable %in% foods)
+energy_labels = id_desc %>% filter(Variable %in% energypers)
+
+
+df_longf <- gather(df, key = "variable", value = "value", foods)
+df_longf = df_longf %>% mutate
+df_longe <- gather(df, key = "variable", value = "value", energypers)
+
+ggplot(df_longf, aes(x = variable, y = value, fill = group)) +
+  geom_boxplot(alpha = 0.5) +
+  coord_flip() +
+  scale_fill_manual(values = c("lightblue", "pink"), name = "Cohort")  +
+  scale_x_discrete(limits = food_labels$Variable, labels = food_labels$name) +
+  labs(x = "Food group", y = "Servings per day", fill = "Group")+
+  theme(text = element_text(size=10))
+
+ggplot(df_longe, aes(x = variable, y = value, fill = group)) +
+  geom_boxplot(alpha = 0.5) +
+  coord_flip() +
+  scale_fill_manual(values = c("lightblue", "pink"), name = "Cohort") +
+  scale_x_discrete(limits = energy_labels$Variable, labels = energy_labels$name) +
+  labs(x = "Nutrient group", y = "% of Total Energy Intake", fill = "Group") +
+  theme(text = element_text(size=10))
+```
+
+## Saving/Clearing Environment
+```{r Cleanup3, include=FALSE}
+nutr_var_info= final %>% filter(Variable %in% energypers) %>% mutate(Indigenous_median = Indigenous, NonIndigenous_median = NonIndigenous, Difference = diff, VariableName = V2) %>% select(VariableName, Indigenous_median, NonIndigenous_median, Difference, P_Value)
+
+
+save(sig_nutr_final, nutr_var_info,
+      file = "nutranalysis.Rdata")
+ # List all objects in the environment
+all_objects <- ls()
+# Remove all objects except for the "p7.Rdata" file
+rm(list=setdiff(all_objects, c("p7.Rdata", "biomanalysis.Rdata", "nutranalysis.Rdata")))
+load("p7.Rdata")
+load("biomanalysis.Rdata")
+load("nutranalysis.Rdata")
+```
+
+# Associating Diet to CVD Risk in Cohorts
+
+## Setup and Definitions
+```{r Setup}
+cvdnutr <- sig_biom_final %>% 
+            left_join(sig_nutr_final %>% select(-group), by = "ABSPID") 
+
+# Lets define high risk cvd as satisfying at least two of the CVD criteria (Nutrition students):
+
+cvdnutr$cvd_risk <- ifelse(
+  (
+      ifelse(!is.na(cvdnutr$Obesity) & cvdnutr$Obesity == "Obese", 1, 0) +
+      # ifelse(!is.na(cvdnutr$Hypertension) & cvdnutr$Hypertension == "Hypertensive", 1, 0) +
+      ifelse(!is.na(cvdnutr$Diabetes) & cvdnutr$Diabetes == "Diabetic", 1, 0) +
+      ifelse(!is.na(cvdnutr$ApoB) & cvdnutr$ApoB == "Abnormal ApoB", 1, 0) +
+      ifelse(!is.na(cvdnutr$Dyslipidemia) & cvdnutr$Dyslipidemia== "Dyslipidemia", 1, 0)) >= 2, "high", "low")
+      #  + ifelse(!is.na(cvdnutr$SMKDAILY) & cvdnutr$SMKDAILY %in% c("1. Current daily smoker", "2. Past daily smoker (still smokes)"), 1, 0)
+
+table(cvdnutr$cvd_risk, cvdnutr$group)
+```
+
+### Dietary ranges
+```{r Setup2}
+# Define risk categories in dietary variables (Nutrition students) 
+
+cvdnutrdf = cvdnutr %>% mutate(
+  Vegetables_Legumes_beans = case_when(
+    VEGLEGN_mean < 5.5 ~ '< 5.5',
+    VEGLEGN_mean > 5.5 ~ '≥ 5.5',TRUE ~ NA_character_),
+  Fruit = case_when(
+    FRUITN_mean < 2 ~ '< 2 ',
+    FRUITN_mean >= 2 ~ '≥ 2 ',TRUE ~ NA_character_),
+  Grains_cereals = case_when(
+    GRAINSN_mean < 6 ~ '< 6 ',
+    GRAINSN_mean >= 6 ~ '≥ 6 ',TRUE ~ NA_character_),
+  Meat_Poultry = case_when(
+    MEATN_mean < 2.5 ~ '< 2.5 ',
+    MEATN_mean >= 2.5 ~ '≥ 2.5 ',TRUE ~ NA_character_),
+  Dairy = case_when(
+    DAIRYN_mean < 2.5 ~ '< 2.5 ',
+    DAIRYN_mean >= 2.5 ~ '≥ 2.5 ',TRUE ~ NA_character_),
+  Unsaturated_Spread_Oils = case_when(
+    UNSATN_mean < 4 ~ '< 4 ',
+    UNSATN_mean >= 4 ~ '≥ 4 ',TRUE ~ NA_character_),
+  FreeSugar = case_when(
+    UNSATN_mean < 10 ~ '< 10 %',
+    UNSATN_mean >= 10 ~ '≥ 10 %',TRUE ~ NA_character_),
+  TotalFat = case_when(
+    FATPER_mean < 30 ~ '< 30 %',
+    FATPER_mean >= 30 ~ '≥ 30 %',TRUE ~ NA_character_),
+  Carbohydrates = case_when(
+    CHOPER_mean <= 40 ~ '≤ 40 %',
+    CHOPER_mean > 40 & CHOPER_mean < 70 ~ '40 -70 %',
+    CHOPER_mean >= 70 ~ '≥ 70 %',TRUE ~ NA_character_),
+  Protein = case_when(
+    PROPER_mean <= 15 ~ '< 15 %',
+    CHOPER_mean > 15 & CHOPER_mean < 25 ~ '15 -25 %',
+    CHOPER_mean >= 25 ~ '≥ 25 %',TRUE ~ NA_character_),
+  SaturatedTransFat = case_when(
+    SATPER_mean < 11 ~ '< 11 %',
+    SATPER_mean >= 11 ~ '≥ 11 %',TRUE ~ NA_character_),
+  DietaryFibre = case_when(
+    FIBRET_mean < 30 ~ '< 30 g',
+    FIBRET_mean >= 30 ~ '≥ 30 g',TRUE ~ NA_character_),
+  cvd_risk_stat = ifelse(cvdnutr$cvd_risk == 'high', 1, 0)) %>% 
+  select(c(colnames(sig_biom_final), Vegetables_Legumes_beans, Fruit, Grains_cereals, Meat_Poultry, Dairy, Unsaturated_Spread_Oils, FreeSugar, TotalFat, Carbohydrates, Protein, SaturatedTransFat, DietaryFibre, cvd_risk, cvd_risk_stat))
+```
+
+## Preliminary regression model
+Build preliminary regression model (in our presentation)
+```{r RegressionModel}
+# Split the data into training and test sets (70% training, 30% test)
+splitIndex <- createDataPartition(cvdnutr$cvd_risk, p = .7, list = FALSE)
+train_data <- cvdnutr[splitIndex, ]
+test_data <- cvdnutr[-splitIndex, ]
+train_data$cvd_risk <- ifelse(train_data$cvd_risk == "high", 1, 0)
+test_data$cvd_risk <- ifelse(test_data$cvd_risk == "high", 1, 0)
+
+# Get nutrition variable names
+nutr_vars <- setdiff(colnames(sig_nutr_final), c("ABSPID", "group"))
+
+# Fit the model
+model_diet <- glm(cvd_risk ~ .,
+                   data = train_data %>% select(cvd_risk, all_of(nutr_vars), group),
+                   family = "binomial")
+
+
+# Extract coefficients from the model
+coef_summary <- summary(model_diet)$coefficients
+
+# Predict probabilities
+probabilities <- predict(model_diet, type = "response", newdata = test_data)
+
+# Convert to binary prediction based on a threshold (0.5 is common)
+predicted_values <- ifelse(probabilities > 0.5, 1, 0)
+
+# ROC curve
+roc_obj <- roc(test_data$cvd_risk, probabilities)
+auc(roc_obj)
+plot(roc_obj, main="ROC Curve")
+
+
+# Plot residuals
+plot(residuals(model_diet), main="Residuals vs Fitted", xlab="Fitted values", ylab="Residuals")
+abline(h = 0, col = "red")
+
+# Generate confusion matrix
+cm <- confusionMatrix(as.factor(predicted_values), as.factor(test_data$cvd_risk))
+
+# Print the confusion matrix and related statistics
+print(cm)
+```
+## Odds ratio plot
+Odds ratio plot we agreed to add after presentation (Gao originally responsible for implementing)
+
+```{r}
+# Indigenous
+explanatory_food <- c( "Vegetables_Legumes_beans",'Fruit','Grains_cereals','Meat_Poultry','Dairy','Unsaturated_Spread_Oils')
+explanatory_nutr <- c( 'FreeSugar','TotalFat','Carbohydrates','Protein','SaturatedTransFat','DietaryFibre')
+dependent <- "cvd_risk_stat"
+
+#Indigenous cohort
+
+p1 = cvdnutrdf %>% filter(group == 'Indigenous') %>% or_plot(dependent, explanatory_food,table_text_size = 2.6, dependent_label = "Indigenous cohort", suffix = "")
+
+p2 = cvdnutrdf %>% filter(group == 'Indigenous') %>% or_plot(dependent, explanatory_nutr,table_text_size = 2.6, dependent_label = "Indigenous cohort", suffix = "")
+
+
+# Non-Indigenous)
+p3 = cvdnutrdf %>% filter(group == 'Non-Indigenous') %>% or_plot(dependent, explanatory_food,table_text_size = 2.6, dependent_label = "Non-Indigenous cohort", suffix = "")
+p4 = cvdnutrdf %>% filter(group == 'Non-Indigenous') %>% or_plot(dependent, explanatory_nutr,table_text_size = 2.6, dependent_label = "Non-Indigenous cohort", suffix = "")
+
+```
+## Findings
+# Odds Plot
+```{r}
+p51 = grid.arrange(p1, p2, ncol = 1, top = textGrob('', gp = gpar(fontsize = 20)))
+p6 = grid.arrange(p3, p4, ncol = 1, top = textGrob('', gp = gpar(fontsize = 20)))
+p51
+p6
+```
+Results show that (p < 0.05):
+<br>
+Ind cohort:
+<br>
+Meat/Poultry (>=2.5, OR = 0.6)
+<br>
+Unsaturated spreads/oils (>= 4, OR = 0.59)
+<br>
+Protein (>=25%, OR = 0.49)
+
+
+NonInd cohot:
+<br>
+Diet with high intake of Protein (>= 25%)corresponds to 1.34 on OR plot (p < 0.05)
+<br>
+Diet with hight intake of Dietary fibre (>= 30g) corresponds to 0.74 on OR plot (p < 0.05)
+<br>
+# Future direction
+Build regression model with these vars / some sort of classification model?
+<br>
+interaction effect? feedback greatly appreciated. 
+<br>
+(to be continued...)
+
+```{r}
+model_interaction <- glm(cvd_risk_stat ~ (Vegetables_Legumes_beans + Fruit + Grains_cereals + Meat_Poultry + Dairy + Unsaturated_Spread_Oils + FreeSugar + TotalFat + Carbohydrates + Protein + SaturatedTransFat + DietaryFibre) * group, data = cvdnutrdf, family = binomial, na.action = na.exclude)
+summary(model_interaction)
+```
+
+```{r}
+# Use stepwise for a 'quick' best model:
+stepwise_model <- MASS::stepAIC(model_interaction, direction = "both", trace = FALSE)
+summary(stepwise_model)
+```
+
+

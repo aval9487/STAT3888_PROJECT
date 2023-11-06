@@ -1,0 +1,188 @@
+---
+title: "relation"
+output: html_document
+date: "2023-10-23"
+---
+
+```{r}
+cvdnutr <- sig_biom_final %>% 
+            left_join(sig_nutr_final %>% select(-group), by = "ABSPID") 
+```
+
+
+
+Lets define high risk cvd as satisfying at least two of the CVD criteria:
+```{r}
+cvdnutr$cvd_risk <- ifelse(
+  (
+      ifelse(!is.na(cvdnutr$Obesity) & cvdnutr$Obesity == "Obese", 1, 0) +
+      # ifelse(!is.na(cvdnutr$Hypertension) & cvdnutr$Hypertension == "Hypertensive", 1, 0) +
+      ifelse(!is.na(cvdnutr$Diabetes) & cvdnutr$Diabetes == "Diabetic", 1, 0) +
+      ifelse(!is.na(cvdnutr$ApoB) & cvdnutr$ApoB == "Abnormal ApoB", 1, 0) +
+      ifelse(!is.na(cvdnutr$Dyslipidemia) & cvdnutr$Dyslipidemia== "Dyslipidemia", 1, 0)) >= 2, "high", "low")
+      #  + ifelse(!is.na(cvdnutr$SMKDAILY) & cvdnutr$SMKDAILY %in% c("1. Current daily smoker", "2. Past daily smoker (still smokes)"), 1, 0)
+```
+
+```{r}
+table(cvdnutr$cvd_risk, cvdnutr$group)
+```
+
+
+
+
+```{r}
+# Define risk categories in dietary variables (Nutrition students) 
+
+cvdnutrdf = cvdnutr %>% mutate(
+  Vegetables_Legumes_beans = case_when(
+    VEGLEGN_mean < 5.5 ~ '< 5.5',
+    VEGLEGN_mean > 5.5 ~ '≥ 5.5',TRUE ~ NA_character_),
+  Fruit = case_when(
+    FRUITN_mean < 2 ~ '< 2 ',
+    FRUITN_mean >= 2 ~ '≥ 2 ',TRUE ~ NA_character_),
+  Grains_cereals = case_when(
+    GRAINSN_mean < 6 ~ '< 6 ',
+    GRAINSN_mean >= 6 ~ '≥ 6 ',TRUE ~ NA_character_),
+  Meat_Poultry = case_when(
+    MEATN_mean < 2.5 ~ '< 2.5 ',
+    MEATN_mean >= 2.5 ~ '≥ 2.5 ',TRUE ~ NA_character_),
+  Dairy = case_when(
+    DAIRYN_mean < 2.5 ~ '< 2.5 ',
+    DAIRYN_mean >= 2.5 ~ '≥ 2.5 ',TRUE ~ NA_character_),
+  Unsaturated_Spread_Oils = case_when(
+    UNSATN_mean < 4 ~ '< 4 ',
+    UNSATN_mean >= 4 ~ '≥ 4 ',TRUE ~ NA_character_),
+  FreeSugar = case_when(
+    UNSATN_mean < 10 ~ '< 10 %',
+    UNSATN_mean >= 10 ~ '≥ 10 %',TRUE ~ NA_character_),
+  TotalFat = case_when(
+    FATPER_mean < 30 ~ '< 30 %',
+    FATPER_mean >= 30 ~ '≥ 30 %',TRUE ~ NA_character_),
+  Carbohydrates = case_when(
+    CHOPER_mean <= 40 ~ '≤ 40 %',
+    CHOPER_mean > 40 & CHOPER_mean < 70 ~ '40 -70 %',
+    CHOPER_mean >= 70 ~ '≥ 70 %',TRUE ~ NA_character_),
+  Protein = case_when(
+    PROPER_mean <= 15 ~ '< 15 %',
+    CHOPER_mean > 15 & CHOPER_mean < 25 ~ '15 -25 %',
+    CHOPER_mean >= 25 ~ '≥ 25 %',TRUE ~ NA_character_),
+  SaturatedTransFat = case_when(
+    SATPER_mean < 11 ~ '< 11 %',
+    SATPER_mean >= 11 ~ '≥ 11 %',TRUE ~ NA_character_),
+  DietaryFibre = case_when(
+    FIBRET_mean < 30 ~ '< 30 g',
+    FIBRET_mean >= 30 ~ '≥ 30 g',TRUE ~ NA_character_),
+  cvd_risk_stat = ifelse(cvdnutr$cvd_risk == 'high', 1, 0)) %>% 
+  select(c(colnames(sig_biom_final), Vegetables_Legumes_beans, Fruit, Grains_cereals, Meat_Poultry, Dairy, Unsaturated_Spread_Oils, FreeSugar, TotalFat, Carbohydrates, Protein, SaturatedTransFat, DietaryFibre, cvd_risk, cvd_risk_stat))
+
+```
+
+
+Build preliminary regression model (in our presentation)
+```{r}
+# Split the data into training and test sets (70% training, 30% test)
+splitIndex <- createDataPartition(cvdnutr$cvd_risk, p = .7, list = FALSE)
+train_data <- cvdnutr[splitIndex, ]
+test_data <- cvdnutr[-splitIndex, ]
+train_data$cvd_risk <- ifelse(train_data$cvd_risk == "high", 1, 0)
+test_data$cvd_risk <- ifelse(test_data$cvd_risk == "high", 1, 0)
+
+# Get nutrition variable names
+nutr_vars <- setdiff(colnames(sig_nutr_final), c("ABSPID", "group"))
+
+# Fit the model
+model_diet <- glm(cvd_risk ~ .,
+                   data = train_data %>% select(cvd_risk, all_of(nutr_vars), group),
+                   family = "binomial")
+
+
+# Extract coefficients from the model
+coef_summary <- summary(model_diet)$coefficients
+
+# Predict probabilities
+probabilities <- predict(model_diet, type = "response", newdata = test_data)
+
+# Convert to binary prediction based on a threshold (0.5 is common)
+predicted_values <- ifelse(probabilities > 0.5, 1, 0)
+
+# ROC curve
+roc_obj <- roc(test_data$cvd_risk, probabilities)
+auc(roc_obj)
+plot(roc_obj, main="ROC Curve")
+
+
+# Plot residuals
+plot(residuals(model_diet), main="Residuals vs Fitted", xlab="Fitted values", ylab="Residuals")
+abline(h = 0, col = "red")
+
+# Generate confusion matrix
+cm <- confusionMatrix(as.factor(predicted_values), as.factor(test_data$cvd_risk))
+
+# Print the confusion matrix and related statistics
+print(cm)
+```
+
+
+Odds ratio plot we agreed to add after presentation (Gao originally responsible for implementing)
+
+```{r}
+# Indigenous
+explanatory_food <- c( "Vegetables_Legumes_beans",'Fruit','Grains_cereals','Meat_Poultry','Dairy','Unsaturated_Spread_Oils')
+explanatory_nutr <- c( 'FreeSugar','TotalFat','Carbohydrates','Protein','SaturatedTransFat','DietaryFibre')
+dependent <- "cvd_risk_stat"
+
+#Indigenous cohort
+
+p1 = cvdnutrdf %>% filter(group == 'Indigenous') %>% or_plot(dependent, explanatory_food,table_text_size = 2.6, dependent_label = "Indigenous cohort", suffix = "")
+
+p2 = cvdnutrdf %>% filter(group == 'Indigenous') %>% or_plot(dependent, explanatory_nutr,table_text_size = 2.6, dependent_label = "Indigenous cohort", suffix = "")
+
+
+# Non-Indigenous)
+p3 = cvdnutrdf %>% filter(group == 'NonIndigenous') %>% or_plot(dependent, explanatory_food,table_text_size = 2.6, dependent_label = "Non-Indigenous cohort", suffix = "")
+p4 = cvdnutrdf %>% filter(group == 'NonIndigenous') %>% or_plot(dependent, explanatory_nutr,table_text_size = 2.6, dependent_label = "Non-Indigenous cohort", suffix = "")
+
+```
+
+# Odds Plot
+```{r}
+p51 = grid.arrange(p1, p2, ncol = 1, top = textGrob('', gp = gpar(fontsize = 20)))
+p6 = grid.arrange(p3, p4, ncol = 1, top = textGrob('', gp = gpar(fontsize = 20)))
+p51
+p6
+```
+Results show that (p < 0.05):
+Ind cohort:
+Meat/Poultry (>=2.5, OR = 0.6)
+Unsaturated spreads/oils (>= 4, OR = 0.59)
+Protein (>=25%, OR = 0.49)
+
+
+NonInd cohot:
+Diet with high intake of Protein (>= 25%)corresponds to 1.34 on OR plot (p < 0.05)
+Diet with hight intake of Dietary fibre (>= 30g) corresponds to 0.74 on OR plot (p < 0.05)
+
+
+
+
+
+
+Build regression model with these vars / some sort of classification model? interaction effect? feedback greatly appreciated. 
+
+(to be continued...)
+
+```{r}
+model_interaction <- glm(cvd_risk_stat ~ (Vegetables_Legumes_beans + Fruit + Grains_cereals + Meat_Poultry + Dairy + Unsaturated_Spread_Oils + FreeSugar + TotalFat + Carbohydrates + Protein + SaturatedTransFat + DietaryFibre) * group, data = cvdnutrdf, family = binomial, na.action = na.exclude)
+summary(model_interaction)
+```
+
+```{r}
+# Use stepwise for a 'quick' best model:
+stepwise_model <- MASS::stepAIC(model_interaction, direction = "both", trace = FALSE)
+summary(stepwise_model)
+```
+
+
+
+
+

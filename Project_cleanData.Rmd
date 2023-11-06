@@ -17,6 +17,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ## Libraries
 ```{r warning=FALSE, message=FALSE}
 library(tidyverse)
+# library(MASS) # must be called before dplyr to avoid select() conflict ! 
 library(here)      # directory referencing
 library(readxl)    # reading Excel files
 library(janitor)   # data cleaning 
@@ -33,6 +34,9 @@ library(bestNormalize)
 library(car)
 library(caret)
 library(pROC)
+library('finalfit')
+library(gridExtra)
+library(grid)
 ```
 
 
@@ -610,11 +614,19 @@ tech_abor = merge(tech_abor, df_abor, by = "ABSHID", all = TRUE)
 ```
 
 
+PATCH 7: ADD PROXY ABSPID TO ABORIGINAL DATA 
+```{r}
+tech_abor = tech_abor %>% mutate(ABSPID = row_number())
+```
+
+
+
 Final DFs
 ```{r}
 head(tech_abor)
 head(biom_nutr_food)
 ```
+
 
 
 
@@ -626,7 +638,7 @@ aborig_household_dict = dict_abor
       tech_food, dict_food, types_food,
       dict_food_class, biom_nutr_food,
       tech_abor,aborig_household_dict,
-      file = "p6.Rdata")
+      file = "p7.Rdata")
 ```
 
 
