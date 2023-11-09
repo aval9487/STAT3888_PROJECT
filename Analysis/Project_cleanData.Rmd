@@ -1,0 +1,646 @@
+---
+title: "Stat3888 Assignment"
+author: 'SID: 500505887'
+date: "Date: 2023-09-01"
+output: 
+  html_document:
+    code_folding: hide
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Initialisation
+
+## Libraries
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+# library(MASS) # must be called before dplyr to avoid select() conflict ! 
+library(here)      # directory referencing
+library(readxl)    # reading Excel files
+library(janitor)   # data cleaning 
+library(stringr)   # string manimpuation
+library(tidyr) 
+library(dplyr)
+library(naniar)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(purrr)
+library(moments)  # for skewness function
+library(bestNormalize)
+library(car)
+library(caret)
+library(pROC)
+library('finalfit')
+library(gridExtra)
+library(grid)
+```
+
+
+## Functions
+
+Label variables as continuous and categorical
+```{r}
+get_type <- function(dict) 
+{
+  #dict <- dict_nutr
+  var_names <- unique(dict$variable_name)
+  var_type  <- c()
+  for (j in 1:length(var_names))
+  {
+    # Get all dictionary lines corresponding to a varible
+    # (a block of lines)
+    dict_block <- dict %>% 
+      filter(variable_name==var_names[j])
+    
+    # Take all of the characters in a block, paste them 
+    # together and make all characters lower case
+    block_string <- dict_block %>%
+      select(-variable_name) %>%
+      as.matrix() %>%
+      as.vector() %>%
+      paste(collapse="") %>%
+      tolower()
+    
+    # Assign variable if we can find the word "continuous"
+    # in the block otherwise assume that it is "categorical"
+    var_type[j] <- block_string %>% 
+      str_detect("continuous") %>% 
+      ifelse("continuous","categorical") 
+  }
+  return(var_type)
+}
+```
+
+
+Split the description variable in the data dictionary into value and meaning columns (* Modified from given)
+```{r}
+get_my_special_value_meanings <- function(dict) {
+  special <- tibble(variable_name = c(),
+                    value = c(),
+                    meaning = c())
+  
+  for (i in 1:nrow(dict)) {
+    variable <- dict$variable_name[i]
+    description <- tolower(dict$description[i])  # Convert description to lowercase
+    
+    # Check if description contains "continuous"
+    if (grepl("continuous", description)) {
+      next  # Skip entries with "continuous" in description
+    }
+    
+    # Check if description starts with a number followed by a period and space
+    if (grepl("^\\d+\\. ", description)) {
+      # Extract value and meaning using pattern matching
+      values <- str_match(description, "^(\\d+\\. )(.*)")
+      value <- values[2]
+      meaning <- values[3]
+      
+      result <- tibble(variable_name = variable,
+                       value = value,
+                       meaning = meaning)
+      
+      special <- bind_rows(special, result)
+    } else {
+      # If description doesn't follow the pattern, treat the whole description as meaning
+      result <- tibble(variable_name = variable,
+                       value = NA,
+                       meaning = description)
+      
+      special <- bind_rows(special, result)
+    }
+  }
+  
+  return(special)
+}
+```
+
+Split the description variable in the data dictionary into value and meaning columns (* Original)
+```{r}
+get_special_value_meanings <- function(dict)
+{
+  var_names <- unique(dict$variable_name)
+  special   <- tibble(variable_name=c(),
+                      value=c(),
+                      meaning=c())
+  
+  for (j in 1:length(var_names)) 
+  {
+    # Get a block of values from the dictionary
+    block <-  dict %>%
+      filter(variable_name==var_names[j])
+  
+    if (nrow(block)>1) {
+      # Split  the descrition into value/meaning pairs
+      special_block <- block[-1,-c(3:ncol(block))] %>%
+        dplyr::filter(!grepl("continuous",tolower(description))) %>%
+        separate(col=2, 
+                 sep="[.]",
+                 into=c("value","meaning")) %>%
+        mutate(value=as.numeric(value),
+               meaning=tolower(str_trim(meaning))) 
+      
+      # append these to a block of special value/meaning pairs
+      special <- bind_rows(special, special_block)
+    }
+  }
+  return(special)
+}
+```
+
+
+Label all categorical variables and convert them to factors in R.
+```{r}
+categorical_to_factor <- function(types, proc) 
+{
+  var_names <- colnames(proc)  
+  for (i in 1:length(var_names)) 
+  {
+    # Extract the inferred variable type from the types tibble
+    var_type <- types %>% 
+      filter(variable_name==var_names[i]) %>%
+      select(variable_type) %>%
+      as.character()
+    
+    # If the type is categorical turn the variable into a factor
+    if (var_type=="categorical") {
+      proc[[var_names[i]]] <- as.factor(proc[[var_names[i]]])
+    }
+  }
+  return(proc)
+}
+```
+
+
+Convert raw data to technically correct data
+```{r}
+miss_defs <- c("Did not proceed to Biomedical component",
+                     "Measurement not taken - equipment faulty",
+                     "Measurement not taken - other reason",
+                     "Measurement not taken - refusal",
+                     "None of these apply",
+                     "Not applicable",
+                     "Not collected",
+                     "Not currently on a diet",
+                     "Not determined",
+                     "Not known",
+                     "Not known if currently on a diet",
+                     "Not measured",
+                     "Not reported",
+                     "Not used",
+                     "Not stated")
+raw_to_tech <- function(proc, special, types)
+{
+  var_names <- colnames(proc)
+  for (j in 1:length(var_names)) 
+  {
+    var_val <- var_names[j]
+    specials <- special %>%
+      filter(variable_name==var_val)
+    if (nrow(specials)>0) 
+    {
+      ind <- which(var_names==var_val)
+      var_miss_str  <- paste0(var_val,"_MISS")
+      var_miss_reas <- rep("observed",nrow(proc))
+      var_vals      <- proc[,ind]
+      var_type <- types %>% 
+        filter(variable_name==var_val) %>%
+        select(variable_type) %>%
+        as.character()
+      if (var_type=="continuous") {
+        for (i in 1:length(var_vals)) {
+          if (var_vals[i] %in% specials$value) {
+            ind2 <- which(var_vals[i]==specials$value)
+            var_vals[i]      <- NA
+            var_miss_reas[i] <- specials[ind2,3] %>% as.character()
+          }
+        }
+      }
+      if (var_type=="categorical") {
+        for (i in 1:length(var_vals)) {
+          spec_val  <- specials$value
+          spec_meam <- specials$meaning
+          if (var_vals[i] %in% spec_val) 
+          {
+            var_mean <- spec_meam[var_vals[i] == spec_val]
+            if (var_mean %in% miss_defs) {
+              var_vals[i]      <- NA
+              var_miss_reas[j] <- var_mean
+            }
+          } else {
+            var_vals[i]      <- NA
+            var_miss_reas[i] <- "unknown"
+          }
+        }
+      }
+      if (any(is.na(var_vals))) {
+        proc[,ind] <- var_vals
+        proc$dummy <- var_miss_reas
+        colnames(proc)[ncol(proc)] <- var_miss_str
+      }
+    }
+  }
+  return(proc)
+}
+```
+
+## Raw to technically correct pipeline
+```{r}
+#read in raw data
+raw_biom <- read.csv(here("data","AHS11biomedical.csv"), header=TRUE)
+raw_nutr <- read.csv(here("data","AHS11nutrient.csv"), header=TRUE)
+raw_food <- read.csv(here("data","AHS11food.csv"), header=TRUE)
+
+quiet_read <- purrr::quietly(readxl::read_excel) # returns [result, output, messages, warning] of a function
+
+# read in dics for raw data
+dict_biom <- quiet_read(here("data","nutmstatDataItems2019.xlsx"),sheet=1)$result
+dict_nutr <- quiet_read(here("data","nutmstatDataItems2019.xlsx"),sheet=2)$result
+dict_food <- quiet_read(here("data","nutmstatDataItems2019.xlsx"),sheet=3)$result
+
+# clean var names
+dict_biom <- dict_biom %>% janitor::clean_names() %>% rename(extra=x3)
+dict_nutr <- dict_nutr %>% janitor::clean_names() %>% rename(extra1=x3,extra2=x4) 
+dict_food <- dict_food %>% janitor::clean_names() %>% rename(extra=x3) 
+
+# remove empty rows
+dict_biom <- dict_biom %>% janitor::remove_empty("rows")
+dict_nutr <- dict_nutr %>% janitor::remove_empty("rows")
+dict_food <- dict_food %>% janitor::remove_empty("rows")
+
+# Create datasets with human readable versions of the variable names
+biom_readable <- dict_biom %>% 
+  filter(!is.na(variable_name))  
+nutr_readable <- dict_nutr %>% 
+  filter(!is.na(variable_name)) %>% 
+  distinct() # Removes 1 duplicate
+food_readable <- dict_food %>% 
+  filter(!is.na(variable_name)) %>% 
+  distinct()
+
+#Fill in blanks in the variable names
+dict_biom <- dict_biom %>% tidyr::fill(variable_name)
+dict_nutr <- dict_nutr %>% tidyr::fill(variable_name)
+dict_food <- dict_food %>% tidyr::fill(variable_name)  
+
+var_names_biom <- unique(dict_biom$variable_name)
+var_names_nutr <- unique(dict_nutr$variable_name)
+var_names_food <- unique(dict_food$variable_name)
+
+# Try to infer the data types from the data dictionary
+tib1 <- tibble(variable_type=get_type(dict_biom))
+tib2 <- tibble(variable_type=rep("continuous",nrow(nutr_readable)))
+tib3 <- tibble(variable_type=get_type(dict_food))
+
+# Create a new tibble that takes the readable tibble,
+# appends the variable type, and do some minor fixing
+types_biom <- bind_cols(biom_readable, tib1) %>%
+  mutate(variable_type=ifelse(var_names_biom%in%c("ABSPID","ABSHID"), "string",variable_type))
+
+types_nutr <- bind_cols(nutr_readable, tib2) %>%
+  mutate(variable_type=ifelse(variable_name%in%c("ABSPID","ABSHID"), "string",variable_type))
+
+types_food <- bind_cols(food_readable, tib3) %>%
+  mutate(variable_type=ifelse(variable_name%in%c("ABSPID","ABSHID"), "string",variable_type)) 
+#============================================================
+# BIOM DATA
+# Made modification to get_special_value_meanings: descriptions for some categorical values (e.g., GLUCFREB) weren't translating correctly (*)
+special_biom_new <- get_my_special_value_meanings(dict_biom)
+special_biom_new$value <- gsub("\\.", "", special_biom_new$value)  # Remove all dots from the 'value' column
+
+# Remove descriptions
+special_biom_new <- special_biom_new %>% 
+  filter(!is.na(value)) 
+
+# Convert values to numeric
+special_biom_new$value = as.numeric(special_biom_new$value)
+#============================================================
+#Trying my modified function with the other raw (found it doesnt work):
+# special_nutr <- get_my_special_value_meanings(dict_nutr) %>% na.omit()
+# special_food <- get_my_special_value_meanings(dict_food) %>% na.omit()
+#============================================================
+#Using Johns with raw nutr and fodd:
+special_nutr <- get_special_value_meanings(dict_nutr) %>% na.omit()
+special_food <- get_special_value_meanings(dict_food) %>% na.omit()
+#============================================================
+# PATCH 3 (*)
+miss_defs = tolower(miss_defs) #Adds _MISS vars for COMBCODE and EATOCC
+#============================================================
+
+proc_biom <- categorical_to_factor(types_biom,raw_biom)
+proc_nutr <- categorical_to_factor(types_nutr,raw_nutr)
+proc_food <- categorical_to_factor(types_food,raw_food)
+
+# Convert biom data to technically correct
+tech_biom <- raw_to_tech(proc_biom, special_biom_new, types_biom)
+tech_nutr <- raw_to_tech(proc_nutr, special_nutr, types_nutr)
+tech_food <- raw_to_tech(proc_food, special_food, types_food)
+```
+
+
+PATCH 1 - FIX EXERCISE COLUMNS
+```{r}
+# Convert 'phys', 'mod', and 'vig' columns to numeric and create corresponding '_MISS' columns
+# deliberately keeping 9996 and 9999 and desc in _MISS vars because could need them later
+
+# Convert 'phys', 'mod', and 'vig' columns to numeric and create corresponding '_MISS' columns
+tech_biom_mod <- tech_biom %>%
+  mutate(
+    phys_num = as.numeric(as.character(EXLWTBC)),
+    mod_num = as.numeric(as.character(EXLWMBC)),
+    vig_num = as.numeric(as.character(EXLWVBC)),
+    phys_MISS = ifelse(phys_num %in% c(9996, 9999), as.character(phys_num), "observed"),
+    mod_MISS = ifelse(mod_num %in% c(9996, 9999), as.character(mod_num), "observed"),
+    vig_MISS = ifelse(vig_num %in% c(9996, 9999), as.character(vig_num), "observed")
+  )
+
+# Replace entries in 'phys', 'mod', and 'vig' columns with NA where values are 9996 or 9999
+tech_biom_mod$phys_num[tech_biom_mod$phys_num %in% c(9996, 9999)] <- NA
+tech_biom_mod$mod_num[tech_biom_mod$mod_num %in% c(9996, 9999)] <- NA
+tech_biom_mod$vig_num[tech_biom_mod$vig_num %in% c(9996, 9999)] <- NA
+
+
+tech_biom = tech_biom_mod %>% select(
+  -c(EXLWTBC, EXLWMBC, EXLWVBC)
+)
+```
+
+
+
+PATCH 2 - Link Food Class to Food data
+```{r}
+df <- tech_food %>%
+  select(
+    FOODCODC,
+    FIVDIG,
+    THRDIG,
+    TWDIG
+  ) %>%
+  mutate(
+    FOODCODC = as.character(FOODCODC),
+    FIVDIG = as.character(FIVDIG),
+    THRDIG = as.character(THRDIG),
+    TWDIG = as.character(TWDIG)
+  )
+
+dict_food_class = quiet_read(here("data","nutmstatDataItems2019.xlsx"),sheet=4)$result
+
+
+# Shift the column names to the values in the  row
+colnames(dict_food_class) <- as.character(dict_food_class[2, ])
+
+# Remove the first row after assigning column names
+dict_food_class <- dict_food_class[-c(1,2), ]
+dict_food_class <- dict_food_class %>% janitor::clean_names()
+
+# Replace values for FOODCODC
+df <- df %>%
+  left_join(dict_food_class, by = c("FOODCODC" = "category_code")) %>%
+  mutate(FOODCODC = category_label) %>%
+  select(-category_label)  # remove the joined 'category_label' column 
+
+# Replace values for FIVDIG
+df <- df %>%
+  left_join(dict_food_class, by = c("FIVDIG" = "category_code")) %>%
+  mutate(FIVDIG = category_label) %>%
+  select(-category_label)
+
+# Replace values for THRDIG
+df <- df %>%
+  left_join(dict_food_class, by = c("THRDIG" = "category_code")) %>%
+  mutate(THRDIG = category_label) %>%
+  select(-category_label)
+
+# Replace for TWDIG
+df <- df %>%
+  left_join(dict_food_class, by = c("TWDIG" = "category_code")) %>%
+  mutate(TWDIG = category_label) %>%
+  select(-category_label)
+
+# Replace original columns in tech_food with the ones from df
+tech_food <- tech_food %>%
+  mutate(
+    FOODCODC = df$FOODCODC,
+    FIVDIG = df$FIVDIG,
+    THRDIG = df$THRDIG,
+    TWDIG = df$TWDIG
+  )
+
+```
+
+PATCH 3 - FIXING FOOD DATA
+Found that expected _MISS variables are not present in tech_food (corrected by tolower()) (*)
+- Other expected _MISS vars (derived from types_food e.g., psaltadd, density, etc.) are not present:
+```{r}
+# checking if all vars in type_food are present in raw data (found that PSALTADD is not present)
+vars_in_types_food = subset(types_food, !is.na(description))$variable_name
+vars_in_raw = colnames(raw_food)
+setdiff(vars_in_types_food, vars_in_raw)
+setdiff(vars_in_raw, vars_in_types_food)
+# Can see that the expected vars are not actually present in the raw data +
+ #there are 4 redundant cols at the end of raw_food - need to remove these.
+tech_food = tech_food %>% select(-setdiff(vars_in_raw, vars_in_types_food))
+```
+
+PATCH 4 - MERGING BIOM, NUTR and FOOD
+
+Biom and nutrient can be joined by ABSPID as there are no duplicate entries for PID
+
+```{r}
+length(unique(tech_biom$ABSPID))
+length(unique(tech_nutr$ABSPID))
+```
+
+```{r}
+biom_nutr_raw = tech_biom %>%
+  full_join(tech_nutr, by = "ABSPID") 
+```
+
+FOOD contains multiple entries per person (ABSPID) so its not a trivial join.
+Im thinking I create a list object for each ABSPID that contains all the information for that ABSPID.
+I.e., Create a column in biom_nutr_raw called FOOD_data ( and for each ABSPID it will contain all info for that ABSPID in tech_food
+
+all info 
+```{r}
+# Split the tech_food dataframe into a list based on ABSPID
+list_data <- with(tech_food, split(tech_food, ABSPID))
+
+# Create a new dataframe with unique ABSPID and corresponding list_data
+list_df <- data.frame(ABSPID = names(list_data), FOOD_DATA = I(list_data))
+
+# Merge with biom_nutr_raw
+biom_nutr_food <- merge(biom_nutr_raw, list_df, by = "ABSPID", all.x = TRUE)
+
+# If some ABSPIDs from biom_nutr_raw don't have corresponding data in tech_nutr, 
+# the FOOD_DATA column for those ABSPIDs will have NAs. If you want to replace NAs with empty lists, you can do:
+biom_nutr_food$FOOD_DATA[sapply(biom_nutr_food$FOOD_DATA, is.null)] <- I(list(data.frame()))
+
+# Could further split into daynum for example (there are 2 levels)
+```
+
+
+
+PATCH 5 - LINK ABORIGINAL AND ISLANDER COHORT
+
+Note that 230ish variables are common between the two datasets. Some variables that are not in the above data dictionary (aboriginal/dictionary.csv) can be found in the numstat dict file (biom, food, nutr, food_class)
+```{r}
+raw_abor = read.csv(here("data/aboriginal","aboriginal_cohort.csv"), header=TRUE)
+dict_abor <- read.csv(here("data/aboriginal","dictionary.csv"),header=TRUE)
+```
+
+
+PATCH 6 - FIX AGE COL NAME (realised that even though only household id is used to identify, they are still individuals (not households; same household id is repeated for different individuals) - might have to check other variables)
+
+```{r}
+raw_abor$AGEC = raw_abor$AGEEC
+```
+
+
+```{r}
+# Function to find descriptions
+find_descriptions <- function(col_names, dictionaries) {
+  descriptions <- character(0)
+  
+  for (col_name in col_names) {
+    for (dict in dictionaries) {
+      match_row <- match(col_name, dict$variable_name)
+      if (!is.na(match_row)) {
+        descriptions <- c(descriptions, dict$description[match_row])
+        break  # Break out of the inner loop once a match is found
+      }
+    }
+  }
+  
+  return(descriptions)
+}
+```
+
+Find colnames in common between biom_nutr_food and aboriginal/islander and extract descriptions
+```{r}
+abor_cols = colnames(raw_abor)
+df_cols = colnames(biom_nutr_food)
+food_cols = colnames(tech_food)
+common_df_abor_cols = intersect(df_cols, abor_cols)
+common_food_abor_cols = intersect(food_cols, abor_cols)
+#only ABSHID (i.e., food data (in biom_nutr_food) not relev for aboriginal cohort)
+descriptions1 <- find_descriptions(common_df_abor_cols, list(types_biom, types_nutr))
+descriptions2 <- find_descriptions(common_food_abor_cols, list(types_food))
+
+```
+
+
+INDGSTAT not in raw data! need another way to classify as indigenous.
+
+<!-- ATTEMPT 1 -->
+<!-- the cultural identification sheet  -->
+<!-- ```{r} -->
+<!-- # set up culture id dictionary for indigenous cohort -->
+<!-- dict_abor <- read_excel(here("data/aboriginal", "australian aboriginal and torres strait islander health survey data item list.xls"), sheet = 11, skip = 4) -->
+<!-- dict_abor = dict_abor %>% select ( -->
+<!--   variable_name = `SAS name`, -->
+<!--   `Items & categories`, -->
+<!--   `Main population` -->
+<!-- )  -->
+<!-- dict_abor <- dict_abor %>% janitor::remove_empty("rows") -->
+<!-- abor_readable <- dict_abor %>%  -->
+<!--   filter(!is.na(variable_name))  -->
+<!-- dict_abor <- dict_abor %>% tidyr::fill(variable_name) -->
+<!-- var_names_abor <- unique(dict_abor$variable_name) -->
+<!-- tib4 <- tibble(variable_type=get_type(dict_abor)) -->
+<!-- types_abor <- bind_cols(abor_readable, tib4) -->
+<!-- cult_id = types_abor[-c(1,nrow(types_abor)), ] -->
+<!-- ``` -->
+<!-- Now, can subset aboriginal cohort data based on the cult id related variables (that we can then use to infer indigenous status) -->
+
+<!-- ```{r} -->
+<!-- cult_id$variable_name %in% colnames(raw_abor) -->
+<!-- 'INDGSTAT' %in% colnames(raw_abor) -->
+<!-- ``` -->
+
+Turns out culture vars arent in raw data. Looking at the dictionary.csv file more carefully, i noticed 'Type of Aboriginal and ...Islander household' which led me to the 'household level' sheet in the dic
+
+
+can use household level data to determine number of aboriginal/islander in each home (only ABSHID is provided in raw data so makes sense)
+- rmk: theres a lot of data there e.g., household_type etc that may help with accuracy later on
+
+```{r}
+# set up household dictionary for indigenous cohort (might be needed later)
+dict_abor <- read_excel(here("data/aboriginal", "australian aboriginal and torres strait islander health survey data item list.xls"), sheet = 4, skip = 4) # skip to where relevant in sheet
+dict_abor = dict_abor %>% select (
+  variable_name = `SAS name`,
+  `Items & categories`,
+  `Main population`
+) 
+dict_abor <- dict_abor %>% janitor::remove_empty("rows")
+abor_readable <- dict_abor %>% 
+  filter(!is.na(variable_name)) 
+dict_abor <- dict_abor %>% tidyr::fill(variable_name)
+var_names_abor <- unique(dict_abor$variable_name)
+tib4 <- tibble(variable_type=get_type(dict_abor))
+types_abor <- bind_cols(abor_readable, tib4)
+```
+
+
+Subset id and number of aboriginal/islander in house
+```{r}
+df_abor = raw_abor %>% select(
+  ABSHID,
+  NOATSIHH
+)
+```
+
+
+```{r}
+# step 1: clean cols that are in biom data
+biom_cols = colnames(tech_biom)
+common_biom_abor_cols = intersect(biom_cols, abor_cols)
+common_biom_abor_cols = c("ABSHID", common_biom_abor_cols)
+biom_abor_df = raw_abor[, common_biom_abor_cols]
+tech_biom_abor = raw_to_tech(biom_abor_df, special_biom_new, types_biom)
+# step 2: clean cols that are in nutr data
+nutr_cols = colnames(tech_nutr)
+common_nutr_abor_cols = intersect(nutr_cols, abor_cols)
+common_nutr_abor_cols = c(common_nutr_abor_cols, "ABSHID")
+nutr_abor_df = raw_abor[, common_nutr_abor_cols]
+tech_nutr_abor = raw_to_tech(nutr_abor_df, special_nutr, types_nutr)
+# step 3: full merge (can filter later if needed)
+tech_abor = merge(tech_biom_abor, tech_nutr_abor, by = "ABSHID", all = TRUE)
+
+# Now need to join household_number var
+tech_abor = merge(tech_abor, df_abor, by = "ABSHID", all = TRUE)
+```
+
+
+PATCH 7: ADD PROXY ABSPID TO ABORIGINAL DATA 
+```{r}
+tech_abor = tech_abor %>% mutate(ABSPID = row_number())
+```
+
+
+
+Final DFs
+```{r}
+head(tech_abor)
+head(biom_nutr_food)
+```
+
+
+
+
+Save for future use.
+```{r}
+aborig_household_dict = dict_abor
+ save(tech_biom, dict_biom, types_biom,
+      tech_nutr, dict_nutr, types_nutr,
+      tech_food, dict_food, types_food,
+      dict_food_class, biom_nutr_food,
+      tech_abor,aborig_household_dict,
+      file = "p7.Rdata")
+```
+
+
+
+

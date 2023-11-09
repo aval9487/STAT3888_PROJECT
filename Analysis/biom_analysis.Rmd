@@ -1,0 +1,310 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+Merge biom data for both groups
+```{r}
+set.seed(123)
+
+biom_ind = types_biom$variable_name[types_biom$variable_name %in% colnames(tech_abor)]
+biom_nonind = types_biom$variable_name[types_biom$variable_name %in% colnames(biom_nutr_food)]
+
+names = intersect(biom_ind, biom_nonind)
+# subset
+ind_biom = tech_abor %>% select(all_of(names)) %>% mutate(group = 'Indigenous')
+nonind_biom = biom_nutr_food %>% select(all_of(names)) %>% mutate(group = 'Non-Indigenous')
+
+for (col_name in names(ind_biom)) {
+  # Skip the 'group' column as it doesn't need to be changed
+  if (col_name != "group") {
+    target_class <- class(nonind_biom[[col_name]])
+   
+    # Check if the classes are different
+    if (class(ind_biom[[col_name]]) != target_class) {
+      # Coerce to the target class
+      if (target_class == "factor") {
+        ind_biom[[col_name]] <- as.factor(ind_biom[[col_name]])
+      } else if (target_class == "numeric") {
+        ind_biom[[col_name]] <- as.numeric(as.character(ind_biom[[col_name]]))  # Convert to character first to avoid potential issues
+      } else if (target_class == "integer") {
+        ind_biom[[col_name]] <- as.integer(as.character(ind_biom[[col_name]]))  # Convert to character first
+      } else if (target_class == "character") {
+        ind_biom[[col_name]] <- as.character(ind_biom[[col_name]])
+      }  # Add more cases if there are more data types you need to handle
+    }
+  }
+}
+
+# Convert variables in nonind_biom to match those in ind_biom
+for (var in names(ind_biom)) {
+  if (is.integer(ind_biom[[var]])) {
+    nonind_biom[[var]] <- as.integer(as.character(nonind_biom[[var]]))
+  }
+  else if (is.numeric(ind_biom[[var]])) {
+    nonind_biom[[var]] <- as.numeric(as.character(nonind_biom[[var]]))
+  }
+}
+
+# Combine the dataframes
+df = rbind(ind_biom, nonind_biom)
+df$group = as.factor(df$group)
+df = df %>% filter(AGEC >=18)
+
+# str(df)
+```
+
+
+Transcribe factor levels from dictionary to df
+```{r}
+for (var in names(df)) {
+  # Check the type of the variable from types_biom
+  var_type <- subset(types_biom, variable_name == var)$variable_type
+ 
+  if (length(var_type) == 0) {
+    next  # skip if the variable is not found in types_biom
+  }
+ 
+  if (var_type == "categorical") {
+    # Fetch the descriptions for the variable from dict_biom
+    descriptions <- subset(dict_biom, variable_name == var)$description
+   
+    # Extract codes from the descriptions
+    codes <- as.numeric(sub("([0-9]+)\\..*", "\\1", descriptions))
+   
+    # Exclude the rows with NA (which would be the ones that don't have codes)
+    valid_rows <- !is.na(codes)
+    descriptions <- descriptions[valid_rows]
+    codes <- codes[valid_rows]
+   
+    # The first valid entry after filtering might be a definition, so we should check and remove it
+    if(!grepl("^[0-9]+\\.", descriptions[1])){
+      descriptions <- descriptions[-1]
+      codes <- codes[-1]
+    }
+   
+    # Create a named vector to map the levels
+    level_mapping <- setNames(descriptions, codes)
+   
+    # Convert the variable to a factor and set the levels
+    df[[var]] <- factor(df[[var]], levels = as.character(codes), labels = descriptions)
+  }
+}
+# str(df)
+```
+
+
+
+Create target variables and corresponding criteria that will be used to define CVD risk (labels and corresponding ranges/criteria provided by nutr students)
+```{r}
+
+# Filter and create flags
+#filtered_df <- df
+df <- df %>%
+  mutate(
+    # Obesity conditions
+    Obesity = case_when(
+      is.na(BMISC) | is.na(SEX) | is.na(PHDCMWBC) ~ NA_character_,
+      BMISC > 30 ~ "Obese",
+      (SEX == "1. Male" & PHDCMWBC > 102) | (SEX == "2. Female" & PHDCMWBC > 88) ~ "Obese",
+      TRUE ~ "Not Obese"
+    ),
+   
+    # Hypertension conditions
+    Hypertension = case_when(
+      is.na(SYSTOL) | is.na(DIASTOL) ~ NA_character_,
+      SYSTOL > 140 | DIASTOL > 90 ~ "Hypertensive",
+      SYSTOL <= 140 & DIASTOL <= 90 ~ "Non-Hypertensive",
+    ),
+   
+    # Diabetes condition
+    Diabetes = case_when(
+      is.na(DIAHBRSK) ~ NA_character_,
+      DIAHBRSK %in% c("2. At risk of diabetes - HbA1c 6.0 - 6.4 %", "3. Indicates diabetes - HbA1c greater than or equal to 6.5%") ~ "Diabetic or at risk",
+      DIAHBRSK == "1. Normal - HbA1c <6.0%" ~ "Non Diabetic",
+    ),
+   
+    # ApoB condition
+    ApoB = case_when(
+      is.na(APOBNTR) ~ NA_character_,
+      APOBNTR == "1. Normal ApoB" ~ "Normal ApoB",
+      APOBNTR == "2. Abnormal ApoB" ~ "Abnormal ApoB",
+    ),
+   
+    # Dyslipidemia conditions
+    Dyslipidemia = case_when(
+      # Conditions for Dyslipidemia
+      (SEX == "1. Male" & HDLCHREB == "1. Less than 1.0") | (SEX == "2. Female" & HDLCHREB %in% c("1. Less than 1.0", "2. 1.0 to less than 1.3")) ~ "Dyslipidemia",
+      !is.na(LDLRESB) & LDLRESB %in% c("06. 3.5 to less than 4.0", "07. 4.0 to less than 4.5", "08. 4.5 or more") ~ "Dyslipidemia",
+      !is.na(TRIGRESB) & TRIGRESB %in% c("05. 2.0 to less than 2.5", "2.5 to less than 3.0", "07. 3.0 or more") ~ "Dyslipidemia",
+     
+      # If no conditions are met and there are no missing variables
+      (is.na(SEX) | is.na(HDLCHREB) | is.na(LDLRESB) | is.na(TRIGRESB)) &
+      !((SEX == "1. Male" & HDLCHREB == "1. Less than 1.0") | (SEX == "2. Female" & HDLCHREB %in% c("1. Less than 1.0", "2. 1.0 to less than 1.3"))) &
+      !(LDLRESB %in% c("06. 3.5 to less than 4.0", "07. 4.0 to less than 4.5", "08. 4.5 or more")) &
+      !(TRIGRESB %in% c("05. 2.0 to less than 2.5", "2.5 to less than 3.0", "07. 3.0 or more")) ~ NA_character_,
+   
+      # Default
+      TRUE ~ "No Dyslipidemia"
+    ))
+
+
+   
+```
+
+
+
+```{r}
+cvd_df = df %>% select(ABSPID, SEX, SMKDAILY,
+Obesity,
+Hypertension,
+Diabetes,
+ApoB,
+Dyslipidemia,
+group)
+cvd_vars <- c('Obesity', 'Hypertension', 'Diabetes', 'ApoB', 'Dyslipidemia')
+str(cvd_df)
+
+```
+
+
+
+```{r}
+plot_df = cvd_df %>% select(all_of(cvd_vars), group)
+gg_miss_fct(plot_df, fct = group)
+
+```
+
+
+
+
+```{r}
+
+levels_of_group <- unique(plot_df$group)
+
+# Loop through each level of the group variable and plot the missingness
+for (level in levels_of_group) {
+  subset_data <- plot_df[plot_df$group == level, ]
+  print(paste("Missingness for group:", level))
+  print(gg_miss_upset(subset_data))
+}
+
+```
+
+
+```{r}
+
+filtered_cvd_df <- cvd_df %>%
+  filter(
+    !(is.na(ApoB) & is.na(Diabetes)), # Not both ApoB and Diabetes are NA
+    !(is.na(ApoB) & is.na(Diabetes) & is.na(Dyslipidemia)) # Not all three variables are NA
+  )
+
+```
+
+```{r}
+plot_df = filtered_cvd_df %>% select(cvd_vars, group)
+levels_of_group <- unique(plot_df$group)
+
+# Loop through each level of the group variable and plot the missingness
+for (level in levels_of_group) {
+  subset_data <- plot_df[plot_df$group == level, ]
+  print(paste("Missingness for group:", level))
+  print(gg_miss_upset(subset_data))
+}
+
+```
+
+```{r}
+table(filtered_cvd_df$group)
+```
+
+Fix group imbalance (randomly sample 2500 from each)
+
+```{r}
+
+# Split data into Indigenous and Non-Indigenous
+indigenous_df <- filter(filtered_cvd_df, group == "Indigenous")
+nonindigenous_df <- filter(filtered_cvd_df, group == "Non-Indigenous")
+
+# Randomly select 2500 samples from each group
+sampled_indigenous <- sample_n(indigenous_df, 2500)
+sampled_nonindigenous <- sample_n(nonindigenous_df, 2500)
+
+# Combine the sampled datasets
+sampled_df <- bind_rows(sampled_indigenous, sampled_nonindigenous)
+# Convert all columns except ABSPID to factors
+sampled_df[, -which(names(sampled_df) == "ABSPID")] <- lapply(sampled_df[, -which(names(sampled_df) == "ABSPID")], factor)
+
+```
+
+
+compare proportions of 'high cvd risk' in indigenous and Non-Indigenous
+
+```{r}
+criteria_proportions <- sampled_df %>%
+  group_by(group) %>%
+  summarise(
+    Total = n(),
+    # Current_or_Past_Smoker = sum(SMKDAILY %in% c("1. Current daily smoker", "2. Past daily smoker (still smokes)"), na.rm = TRUE) / Total,
+    Obese = sum(Obesity == "Obese", na.rm = TRUE) / Total,
+    Hypertensive = sum(Hypertension == "Hypertensive", na.rm = TRUE) / Total,
+    Diabetic = sum(Diabetes == "Diabetic or at risk", na.rm = TRUE) / Total,
+    Abnormal_ApoB = sum(ApoB == "Abnormal ApoB", na.rm = TRUE) / Total,
+    Dyslipidemia = sum(Dyslipidemia == "Dyslipidemia", na.rm = TRUE) / Total
+  ) %>%
+  select(-Total) %>% rename_all(~gsub("_", " ", .)) #removes '_"
+
+
+
+ 
+# Convert the data to a long format
+long_data <- criteria_proportions %>%
+  gather(key = "Criteria", value = "Proportion", -group) %>%
+  filter(Proportion != 1)  # Exclude proportions that equal 1
+
+# Plot the data
+ggplot(long_data, aes(x = Criteria, y = Proportion, fill = group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +  # Flip axes for better visibility with long criterion names
+  labs(y = "Proportion",
+       x = "Risk factor") +
+  theme_minimal() +
+  scale_fill_manual(values = c("lightblue", "pink"), name = "Cohort")
+
+```
+Appears to be a sig difference in high risk between groups -> (ind w./ higher risk)
+
+lets test this difference:
+```{r}
+# Initialize an empty vector to store the significant variables
+sig_vars <- c()
+p_value_df <- data.frame(variable = character(), p_value = numeric())
+
+for (var in cvd_vars) {
+  # Subset the data
+  x <- sampled_df %>% select(var, group)
+  x[[var]] = as.factor(x[[var]])
+  # If the variable is a factor, drop the specified levels and perform statistical testing
+    # Perform Chi-squared test
+    chisq_result <- chisq.test(table(x[[var]], x$group)) 
+    p_value_df <- rbind(p_value_df, data.frame(variable = var, p_value = chisq_result$p.value))
+   
+    # If the p-value is less than 0.05, add the variable name to the sig_vars vector
+    # not sure if i should have done a Bonferroni correction? 
+    if (chisq_result$p.value < 0.05) {
+      sig_vars <- c(sig_vars, var)
+    }
+}
+
+sorted_biom_p_df <- p_value_df %>% arrange(p_value)
+
+# subset the original dataframe
+sig_biom_final <- sampled_df %>% select(ABSPID, group, SEX, SMKDAILY, all_of(sig_vars))
+biom_var_info = long_data
+```
+
+
+
